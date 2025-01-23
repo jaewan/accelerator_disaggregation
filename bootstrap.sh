@@ -24,8 +24,11 @@ check_bazel(){
 				sudo apt-get install -y bazel
 				;;
 			Darwin*)
-				# Example for MacOS. Customize this for your needs
-				brew install bazel
+				if ! command -v brew &> /dev/null; then
+                    echo -e "${RED}Homebrew not found. Installing Homebrew...${NC}"
+                    /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+                fi
+                brew install bazel
 				;;
 			*)
 				echo -e "${RED}Unsupported OS for automatic Bazel installation. Please install manually.${NC}"
@@ -38,97 +41,95 @@ check_bazel(){
 
 # Check/Install Python dependencies
 setup_python() {
-	if ! command -v python3 &> /dev/null; then
-		echo -e "${RED}Python3 not found. Installing...${NC}"
-		if [[ "$OSTYPE" == "darwin"* ]]; then
-			brew install python3
-		else
-			sudo apt update
-			sudo apt install python3 python3-pip
-		fi
-	fi
+        if ! command -v python3 &> /dev/null; then
+                echo -e "${RED}Python3 not found. Installing...${NC}"
+                case "$(uname -s)" in
+                        Linux*)
+                                sudo apt update
+                                sudo apt install -y python3 python3-pip python3-venv
+                                ;;
+                        Darwin*)
+                                brew install python@3.10
+                                ;;
+                        *)
+                                echo -e "${RED}Unsupported OS for Python installation${NC}"
+                                exit 1
+                                ;;
+                esac
+        fi
 
-	# Create virtual environment
-	python3 -m venv .venv
-	source .venv/bin/activate
+        # Create virtual environment
+        python3 -m venv .venv
+        source .venv/bin/activate
+		pip install --upgrade pip
 
-	# Install Python dependencies
-	pip install -r requirements.txt
+        # Install Python dependencies
+        if [ ! -f requirements.txt ]; then
+                cat > requirements.txt << EOF
+torch>=2.0.0
+pybind11>=2.10.0
+zmq>=0.0.0
+EOF
+        fi
 
-	echo -e "${GREEN}Python environment setup complete${NC}"
+        pip install -r requirements.txt
+        echo -e "${GREEN}Python environment setup complete${NC}"
 }
 
 # Check for libtorch
 # This is more complex, needs to consider pre-built binaries or build from source
 # For simplicity, let's assume we expect a prebuilt library to be downloaded
-check_libtorch(){
-	LIBTORCH_DIR="./libtorch"
-	if [ ! -d "${LIBTORCH_DIR}" ]; then
-		echo "Libtorch not found. Downloading and extracting pre-built library..."
-		# Determine OS
-		OS=""
-		case "$(uname -s)" in
-			Linux*)
-				OS="linux"
-				;;
-			Darwin*)
-				OS="macos"
-				;;
-			*)
-				echo "Unsupported OS for automatic libtorch download. Please install manually."
-				exit 1
-				;;
-		esac
-		# Determine CUDA version
-		CUDA_VERSION="cpu"
-		if command -v nvidia-smi &> /dev/null; then
-			CUDA_VERSION="cu118" # Update this as necessary
-		fi
+install_libtorch() {
+    LIBTORCH_DIR="./libtorch"
+    if [ ! -d "${LIBTORCH_DIR}" ]; then
+        echo -e "${RED}Libtorch not found. Downloading Libtorch...${NC}"
 
-		LIBTORCH_URL="https://download.pytorch.org/libtorch/cpu/${OS}/libtorch-${OS}-cpu-latest.zip"
-		if [ "$CUDA_VERSION" != "cpu" ]; then
-			LIBTORCH_URL="https://download.pytorch.org/libtorch/${CUDA_VERSION}/${OS}/libtorch-${OS}-${CUDA_VERSION}-latest.zip"
-		fi
+        OS=""
+        case "$(uname -s)" in
+            Linux*)
+                OS="linux"
+                ;;
+            Darwin*)
+                OS="macos"
+                ;;
+            *)
+                echo -e "${RED}Unsupported OS for Libtorch installation. Please install manually.${NC}"
+                exit 1
+                ;;
+        esac
 
-		echo "Downloading libtorch from ${LIBTORCH_URL}"
-		curl -L -o libtorch.zip "${LIBTORCH_URL}"
-		unzip libtorch.zip
-		mv libtorch-* libtorch
-		rm libtorch.zip
-		echo "Libtorch downloaded and extracted to ./libtorch."
-	fi
-}
+        CUDA_VERSION="cpu"
+        if command -v nvidia-smi &> /dev/null; then
+            CUDA_VERSION="cu118" # Adjust CUDA version as necessary
+        fi
 
-
-# Check for pybind11
-# If you use pybind11, you can check and install if necessary, we are assuming that the pybind will be setup with bazel
-check_pybind(){
-	if ! command -v python3 &> /dev/null; then
-		echo -e "${RED}Python3 not found, please install python3${NIC}"
-		exit 1
-	fi
+        LIBTORCH_URL="https://download.pytorch.org/libtorch/${CUDA_VERSION}/${OS}/libtorch-${OS}-${CUDA_VERSION}-latest.zip"
+        echo "Downloading Libtorch from ${LIBTORCH_URL}"
+        curl -L -o libtorch.zip "${LIBTORCH_URL}"
+        unzip libtorch.zip
+        mv libtorch-* libtorch
+        rm libtorch.zip
+        echo -e "${GREEN}Libtorch downloaded and extracted to ./libtorch.${NC}"
+    else
+        echo -e "${GREEN}Libtorch is already installed.${NC}"
+    fi
 }
 
 
 # Main setup
 main() {
-    # Create requirements.txt if it doesn't exist
-    if [ ! -f requirements.txt ]; then
-        cat > requirements.txt << EOF
-torch>=2.0.0
-pybind11>=2.10.0
-zmq>=0.0.0
-EOF
-    fi
-
+	echo -e "\n${GREEN}Starting setup...${NC}"
+    
     # Run checks and setup
     check_bazel
     setup_python
+	check_libtorch
 
     # Build project
     #bazel build //...
 
-    echo -e "${GREEN}Setup completed successfully!${NC}"
+    echo -e "\n${GREEN}All dependencies installed successfully!${NC}"
+	echo -e "${GREEN}To activate the virtual environment, run: source .venv/bin/activate${NC}"
 }
 
 main
