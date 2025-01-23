@@ -1,0 +1,10 @@
+# Build options
+build --cxxopt='-std=c++17'
+build --copt=-O3
+build --copt=-march=native
+
+# Test options
+test --test_output=errors
+
+# Python options
+build --python_path="/usr/bin/python3"
