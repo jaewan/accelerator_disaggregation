@@ -1,4 +1,5 @@
 import torch
+from remote_gpu_extension_binding import *
 from torch.utils.cpp_extension import load
 
 # Load the extension

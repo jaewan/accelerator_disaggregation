@@ -1,51 +1,63 @@
 # WORKSPACE
-workspace(name = "accelerator_disaggregation") #TODO change this once this project is named
+workspace(name = "accelerator_disaggregation")
 
-# Load Bazel rules for Python
-
+load("@bazel_tools//tools/build_defs/repo:utils.bzl", "maybe")
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 
-
-http_archive(
-    name = "rules_python",
-    urls = ["https://github.com/bazelbuild/rules_python/releases/download/0.24.0/rules_python-0.24.0.tar.gz"],
-    sha256 = "0019dfc4b32d63c1392aa264aed2253c1e0c2fb09216f8e2cc269bbfb8bb49b5",
-)
-
-# Load Python dependencies correctly
-load("@rules_python//python:repositories.bzl", "rules_python_dependencies", "python_register_toolchains")
-rules_python_dependencies()
-python_register_toolchains()
-
-
-
-http_archive(
-    name = "rules_cc",
-    sha256 = "a2c1b3a0d11f8929c5b28a25276a812b0566126b5e2e4a7a13c4d160a07d56a9",
-    strip_prefix = "rules_cc-0.0.7",
-    urls = [
-        "https://github.com/bazelbuild/rules_cc/archive/refs/tags/0.0.7.tar.gz",
-    ],
-)
-
-
-
-# Load gRPC (if needed)
-#http_archive(
-#    name = "com_github_grpc_grpc",
-#    sha256 = "e1353f1f9cf9b9e93011a3c813a20dbd6a9995e768b3b163fa1d3e0a41bb3b95",
-#    strip_prefix = "grpc-1.41.0",
-#    urls = [
-#        "https://github.com/grpc/grpc/archive/refs/tags/v1.41.0.tar.gz",
-#    ],
-#)
-
-# Load additional Bazel dependencies if required
+# Bazel Skylib
 http_archive(
     name = "bazel_skylib",
     sha256 = "6e82e61ccbd1cdb9b5e980b9a2858c2a53f13a8d20f2f0e289d563d08f669779",
     strip_prefix = "bazel-skylib-1.0.3",
-    urls = [
-        "https://github.com/bazelbuild/bazel-skylib/archive/refs/tags/1.0.3.tar.gz",
-    ],
+    urls = ["https://github.com/bazelbuild/bazel-skylib/archive/refs/tags/1.0.3.tar.gz"],
+)
+
+# Python rules
+http_archive(
+    name = "rules_python",
+    sha256 = "94750828b18044533e98a129003b6a68001204038dc4749f40b195b24c38f49f",
+    strip_prefix = "rules_python-0.21.0",
+    url = "https://github.com/bazelbuild/rules_python/releases/download/0.21.0/rules_python-0.21.0.tar.gz",
+)
+
+# Python toolchain setup
+load("@rules_python//python:repositories.bzl", "python_register_toolchains")
+
+python_register_toolchains(
+    name = "python3_8",
+    python_version = "3.8",
+)
+
+# Pybind11 setup
+http_archive(
+    name = "pybind11_bazel",
+    sha256 = "fec6281e4109115c5157ca720b8fe20c8f655f773172290b03f57353c11869c2",
+    strip_prefix = "pybind11_bazel-72cbbf1fbc830e487e3012862b7b720001b70672",
+    urls = ["https://github.com/pybind/pybind11_bazel/archive/72cbbf1fbc830e487e3012862b7b720001b70672.zip"],
+)
+
+http_archive(
+    name = "pybind11",
+    build_file = "@pybind11_bazel//:pybind11.BUILD",
+    sha256 = "5d8c4c5dda428d3a944ba3d2a5212cb988c2fae4670d58075a5a49075a6ca315",
+    strip_prefix = "pybind11-2.10.3",
+    urls = ["https://github.com/pybind/pybind11/archive/v2.10.3.tar.gz"],
+)
+
+# Configure pybind11
+load("@pybind11_bazel//:python_configure.bzl", "python_configure")
+python_configure(name = "local_config_python")
+
+# C++ rules
+http_archive(
+    name = "rules_cc",
+    sha256 = "eb389b5b74862a3d310ee9d6c63348388223b384ae4423ff0fd286fcd123942d",
+    strip_prefix = "rules_cc-0.0.7",
+    urls = ["https://github.com/bazelbuild/rules_cc/archive/refs/tags/0.0.7.tar.gz"],
+)
+
+# Libtorch - using local_repository instead of new_local_repository
+local_repository(
+    name = "libtorch",
+    path = "libtorch",
 )
