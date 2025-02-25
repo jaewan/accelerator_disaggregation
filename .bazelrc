@@ -8,3 +8,5 @@ test --test_output=errors
 
 # Python options
 build --python_path="/usr/bin/python3"
+
+build --action_env=LIBTORCH_URL
