@@ -44,13 +44,11 @@ This script will:
     bazel build //...
     ```
 3. Run the examples:
-Start the remote server:
-    ```bash
-    bazel run //:remote_server
-    ```
-In a separate terminal, run the example client:
-    ```bash
-    bazel run //:basic_example
-    ```
-##License
-This project is licensed under the Apache License 2.0
+	Start the remote server:
+		```bash
+		bazel run //:remote_server
+		```
+	In a separate terminal, run the example client:
+		```bash
+		bazel run //:basic_example
+		```
