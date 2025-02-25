@@ -118,6 +118,7 @@ setup_python() {
 }
 
 # Function to detect CUDA version
+# Function to detect CUDA version
 detect_cuda_version() {
     if [ "$SKIP_CUDA" = true ]; then
         echo "cpu"
@@ -134,31 +135,65 @@ detect_cuda_version() {
         echo "cpu"
         return
     fi
-    if [ "$CUDA_VERSION" -ge "520" ]; then
-        echo "cu121"
+    # Updated CUDA version detection for cu121 and newer
+    if [ "$CUDA_VERSION" -ge "525" ]; then
+        echo "cu121"  # CUDA 12.1 (supported by PyTorch 2.1.0+)
     elif [ "$CUDA_VERSION" -ge "510" ]; then
-        echo "cu118"
+        echo "cu118"  # CUDA 11.8
     elif [ "$CUDA_VERSION" -ge "450" ]; then
-        echo "cu116"
+        echo "cu116"  # CUDA 11.6
     else
         echo -e "${YELLOW}CUDA version ${CUDA_VERSION} might not be compatible. Using CPU-only version.${NC}"
         echo "cpu"
     fi
 }
 
+# Function to validate Libtorch URL
+validate_libtorch_url() {
+    local url=$1
+    echo -e "${YELLOW}Validating Libtorch URL: $url${NC}"
+
+    # Check if URL is accessible, show detailed curl output for debugging
+    if ! curl --output /dev/null --silent --head --fail -v "$url"; then
+        echo -e "${RED}Error: Libtorch URL is not accessible (HTTP error).${NC}"
+        echo -e "${RED}Please verify:${NC}"
+        echo -e "${RED}- PyTorch version (${PYTORCH_VERSION}) is valid${NC}"
+        echo -e "${RED}- CUDA tag (${CUDA_TAG}) is supported${NC}"
+        echo -e "${RED}- The combination exists on download.pytorch.org${NC}"
+        echo -e "${RED}You can also:${NC}"
+        echo -e "${RED}- Try a different PYTORCH_VERSION${NC}"
+        echo -e "${RED}- Use --skip-cuda for CPU-only version${NC}"
+        echo -e "${RED}- Check https://pytorch.org/get-started/locally/ for available versions${NC}"
+        return 1
+    fi
+    return 0
+}
+
 # Function to install Libtorch
 install_libtorch() {
     LIBTORCH_DIR="./libtorch"
     CUDA_TAG=${LIBTORCH_CUDA_VERSION:-$(detect_cuda_version)}
-    PYTORCH_VERSION=${PYTORCH_VERSION:-2.0.0}
+    PYTORCH_VERSION=${PYTORCH_VERSION:-2.5.1}  # Updated default to 2.5.1
+
+    # Validate PyTorch version format
+    if ! [[ "$PYTORCH_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo -e "${RED}Error: Invalid PyTorch version format: $PYTORCH_VERSION${NC}"
+        echo -e "${RED}Please use format X.Y.Z (e.g., 2.5.1)${NC}"
+        exit 1
+    fi
 
     # Construct the LIBTORCH_URL dynamically
     if [ "$CUDA_TAG" = "cpu" ]; then
         LIBTORCH_URL="https://download.pytorch.org/libtorch/cpu/libtorch-shared-with-deps-${PYTORCH_VERSION}%2Bcpu.zip"
     else
-        LIBTORCH_URL="https://download.pytorch.org/libtorch/nightly/${CUDA_TAG}/libtorch-cxx11-abi-shared-with-deps-latest.zip"
+        LIBTORCH_URL="https://download.pytorch.org/libtorch/${CUDA_TAG}/libtorch-shared-with-deps-${PYTORCH_VERSION}%2B${CUDA_TAG}.zip"
     fi
-	echo $LIBTORCH_URL
+    echo -e "${YELLOW}Libtorch URL: $LIBTORCH_URL${NC}"
+
+    # Validate URL before proceeding
+    if ! validate_libtorch_url "$LIBTORCH_URL"; then
+        exit 1
+    fi
 
     # Persist LIBTORCH_URL in ~/.bashrc
     if ! grep -q "export LIBTORCH_URL=" ~/.bashrc; then
@@ -175,8 +210,17 @@ install_libtorch() {
     if [ "$CLEAN" = true ] || [ ! -d "$LIBTORCH_DIR" ]; then
         echo -e "${GREEN}Installing Libtorch...${NC}"
         mkdir -p "$LIBTORCH_DIR"
-        wget -O libtorch.zip "$LIBTORCH_URL"
-        unzip -o libtorch.zip -d "$LIBTORCH_DIR"
+        # Use curl instead of wget for better error handling
+        if ! curl -L "$LIBTORCH_URL" -o libtorch.zip; then
+            echo -e "${RED}Failed to download Libtorch${NC}"
+            rm -f libtorch.zip
+            exit 1
+        fi
+        if ! unzip -o libtorch.zip -d "$LIBTORCH_DIR"; then
+            echo -e "${RED}Failed to unzip Libtorch${NC}"
+            rm -f libtorch.zip
+            exit 1
+        fi
         rm libtorch.zip
     else
         echo -e "${GREEN}Libtorch is already installed. Skipping download.${NC}"
@@ -193,7 +237,7 @@ main() {
     echo -e "${GREEN}Starting setup...${NC}"
     check_bazel
     setup_python
-    install_libtorch
+    #install_libtorch #Have bazel to install libtorch instead of bootstrap.sh
 
     echo -e "\n${GREEN}All dependencies are installed successfully!${NC}"
     echo -e "${GREEN}To activate the virtual environment, run: source .venv/bin/activate${NC}"

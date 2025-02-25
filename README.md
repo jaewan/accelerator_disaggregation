@@ -10,13 +10,29 @@
 
     This will install Bazel and download libtorch if they are not already installed on your system.
 
-2.  **Build the project:**
+	Before building the project, ensure the following system packages are installed:
+
+	**Debian/Ubuntu**:
+	  ```bash
+	  sudo apt-get update
+	  sudo apt-get install python3.8-dev
+	  ```
+
+	**Fedora**:
+	  ```bash
+	  sudo dnf install python3.8-devel
+	  ```
+	**MacOS**:
+	  ```bash
+	  brew install python@3.8
+	  ```
+3.  **Build the project:**
 
     ```bash
     bazel build //...
     ```
 
-3.  **Run the example:**
+4.  **Run the example:**
     ```bash
     bazel run //:basic_example:wq
     bazel run //:remote_server

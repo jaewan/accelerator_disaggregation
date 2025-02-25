@@ -1,6 +1,8 @@
 #ifndef REMOTE_GPU_EXTENSION_H
 #define REMOTE_GPU_EXTENSION_H
 
+#pragma once 
+
 #include <torch/extension.h>
 #include <torch/csrc/Device.h>
 
