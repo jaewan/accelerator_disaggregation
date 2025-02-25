@@ -1,4 +1,4 @@
-def _libtorch_repository_rule_impl(repository_ctx):
+def _libtorch_repository_rule_impl(ctx):
     """Implementation of the libtorch_repository rule.
 
     Downloads and extracts Libtorch based on the specified PyTorch version and CUDA tag.
@@ -6,9 +6,9 @@ def _libtorch_repository_rule_impl(repository_ctx):
     """
 
     # Get attributes from the repository rule
-    pytorch_version = repository_ctx.attr.pytorch_version
-    cuda_tag = repository_ctx.attr.cuda_tag
-    sha256 = repository_ctx.attr.sha256
+    pytorch_version = ctx.attr.pytorch_version
+    cuda_tag = ctx.attr.cuda_tag
+    sha256 = ctx.attr.sha256
 
     # Validate PyTorch version format (X.Y.Z)
     if not _is_valid_pytorch_version(pytorch_version):
@@ -27,46 +27,54 @@ def _libtorch_repository_rule_impl(repository_ctx):
 
     print("Downloading LibTorch from:", libtorch_url)
 
-    # Download and extract Libtorch, stripping the top-level libtorch directory
-    download_result = repository_ctx.download_and_extract(
-        url = libtorch_url,
-        output = ".",
-        sha256 = sha256,  # Use provided SHA256 for verification (empty string if not specified)
-        stripPrefix = "libtorch",  # Strip the top-level libtorch directory
-    )
+    # Prepare download arguments
+    download_args = {
+        "url": libtorch_url,
+        "output": ".",
+        # Don't strip the prefix - keep the full directory structure
+    }
+
+    # Only add sha256 if it's not empty
+    if sha256:
+        download_args["sha256"] = sha256
+
+    # Download and extract Libtorch
+    download_result = ctx.download_and_extract(**download_args)
 
     # Debug: List extracted files to verify structure
     print("Listing extracted files:")
-    repository_ctx.execute(["ls", "-l", "include/torch"])
+    ctx.execute(["ls", "-l", "libtorch/include/torch"])
+    ctx.execute(["find", "libtorch", "-name", "device_guard.h"])
 
     # Create BUILD file for Libtorch
-    repository_ctx.file(
+    ctx.file(
         "BUILD",
         content = """
 cc_library(
     name = "libtorch",
     srcs = glob(
         [
-            "lib/*.so*",
-            "lib/*.dylib*",
-            "lib/*.dll*",
+            "libtorch/lib/*.so*",
+            "libtorch/lib/*.dylib*",
+            "libtorch/lib/*.dll*",
         ],
         # Exclude test and benchmark libraries to reduce size
         exclude = [
-            "lib/*test*",
-            "lib/*benchmark*",
+            "libtorch/lib/*test*",
+            "libtorch/lib/*benchmark*",
         ],
     ),
     hdrs = glob([
-        "include/**/*.h",
-        "include/**/*.hpp",
-        "include/**/*.cuh",
-        "include/**/*.h++",
+        "libtorch/include/**/*.h",
+        "libtorch/include/**/*.hpp",
+        "libtorch/include/**/*.cuh",
+        "libtorch/include/**/*.h++",
+        "libtorch/include/**/*.inl",
     ]),
     includes = [
-        "include",                    # Base include directory
-        "include/torch",              # Explicitly include torch subdirectory
-        "include/torch/csrc/api/include",  # Additional include paths
+        "libtorch/include",
+        "libtorch/include/torch/csrc/api/include",
+        "libtorch/include/torch/csrc/utils",  # Add missing utils directory
     ],
     visibility = ["//visibility:public"],
     linkstatic = 1,
@@ -114,7 +122,7 @@ Example:
         name = "libtorch",
         pytorch_version = "2.5.1",
         cuda_tag = "cu121",
-        sha256 = "YOUR_SHA256_HERE",
+        sha256 = "YOUR_SHA256_HERE",  # Optional
     )
-""",
+    """,
 )
