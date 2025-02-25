@@ -15,16 +15,16 @@
 	**Debian/Ubuntu**:
 	  ```bash
 	  sudo apt-get update
-	  sudo apt-get install python3.8-dev
+	  sudo apt-get install python3.10-dev
 	  ```
 
 	**Fedora**:
 	  ```bash
-	  sudo dnf install python3.8-devel
+	  sudo dnf install python3.10-devel
 	  ```
 	**MacOS**:
 	  ```bash
-	  brew install python@3.8
+	  brew install python@3.10
 	  ```
 3.  **Build the project:**
 

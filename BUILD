@@ -14,8 +14,13 @@ cc_library(
     ],
     copts = [
         "-std=c++17",
-        "-D_GLIBCXX_USE_CXX11_ABI=1",
+        "-D_GLIBCXX_USE_CXX11_ABI=0",	# Forces old C++11 ABI for compatibility with pre-built PyTorch binaries
+										# PyTorch is typically built with this flag, so we need to match it
+		 "-fPIC",
+        "-DTORCH_API_INCLUDE_EXTENSION_H", #Tells compiler this is a Pytorch extension
+        "-DTORCH_EXTENSION_NAME=remote_gpu_extension",# Stes python module name Used when importing the module in Python
     ],
+    linkopts = ["-pthread"],
 )
 
 pybind_extension(
@@ -27,7 +32,7 @@ pybind_extension(
     ],
     copts = [
         "-std=c++17",
-        "-D_GLIBCXX_USE_CXX11_ABI=1",
+        "-D_GLIBCXX_USE_CXX11_ABI=0",
     ],
 )
 

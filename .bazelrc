@@ -1,5 +1,6 @@
 # Build options
 build --cxxopt='-std=c++17'
+build --copt='-D_GLIBCXX_USE_CXX11_ABI=0'
 build --copt=-O3
 build --copt=-march=native
 
@@ -9,4 +10,13 @@ test --test_output=errors
 # Python options
 build --python_path="/usr/bin/python3"
 
-build --action_env=LIBTORCH_URL
+# CUDA configurations
+build:cuda --define=use_cuda=true
+build:cpu --define=use_cuda=false
+
+# Default to CPU if not specified
+build --config=cpu
+
+# Add debug options
+build:debug --compilation_mode=dbg
+build:debug --strip=never

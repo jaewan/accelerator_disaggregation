@@ -4,7 +4,7 @@
 #pragma once 
 
 #include <torch/extension.h>
-#include <torch/csrc/Device.h>
+
 
 namespace remote_gpu {
 

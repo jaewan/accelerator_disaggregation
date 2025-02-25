@@ -1,6 +1,11 @@
 #include "remote_gpu_extension.h"
+
+/*
+#include <torch/csrc/Device.h>
 #include <torch/csrc/utils/device_guard.h>
 #include <torch/csrc/utils/device.h>
+*/
+
 #include <iostream>
 
 namespace remote_gpu {
