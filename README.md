@@ -21,15 +21,14 @@
 sudo apt-get update
 sudo apt-get install python3.10-dev
 ```
-
-	**Fedora**:
-	  ```bash
-	  sudo dnf install python3.10-devel
-	  ```
-	**MacOS**:
-	  ```bash
-	  brew install python@3.10
-	  ```
+**Fedora**:
+  ```bash
+  sudo dnf install python3.10-devel
+  ```
+**MacOS**:
+  ```bash
+  brew install python@3.10
+  ```
 ### Setup Steps
 1. Initialize the environment:
     ```bash
