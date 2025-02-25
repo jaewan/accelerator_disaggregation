@@ -1,21 +1,25 @@
 # AI Accelerator Disaggregation Framework
 
-## Setup
+## Features
+- Remote GPU acceleration support
+- PyTorch integration
+- Low-latency network communication
+- Dynamic resource allocation
 
-1.  **Run the bootstrap script:**
+## Prerequisites
+- Python 3.10
+- CUDA-capable GPU (optional)
+- Bazel build system
 
-    ```bash
-    ./bootstrap.sh
-    ```
 
-    This will install Bazel and download libtorch if they are not already installed on your system.
+## Installation
 
-	Before building the project, ensure the following system packages are installed:
+### System Dependencies
 
-	**Debian/Ubuntu**:
-	  ```bash
-	  sudo apt-get update
-	  sudo apt-get install python3.10-dev
+**Debian/Ubuntu**:
+```bash
+sudo apt-get update
+sudo apt-get install python3.10-dev
 	  ```
 
 	**Fedora**:
@@ -26,14 +30,28 @@
 	  ```bash
 	  brew install python@3.10
 	  ```
-3.  **Build the project:**
+### Setup Steps
+1. Initialize the environment:
+    ```bash
+    ./bootstrap.sh
+    ```
+This script will:
+*Install Bazel if not present
+*Set up Python environment
+*Configure build dependencies
 
+2. Build the project
     ```bash
     bazel build //...
     ```
-
-4.  **Run the example:**
+3. Run the examples:
+Start the remote server:
     ```bash
-    bazel run //:basic_example:wq
     bazel run //:remote_server
     ```
+In a separate terminal, run the example client:
+    ```bash
+    bazel run //:basic_example
+    ```
+##License
+This project is licensed under the Apache License 2.0
