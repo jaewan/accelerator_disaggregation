@@ -151,7 +151,14 @@ install_libtorch() {
     LIBTORCH_DIR="./libtorch"
     CUDA_TAG=${LIBTORCH_CUDA_VERSION:-$(detect_cuda_version)}
     PYTORCH_VERSION=${PYTORCH_VERSION:-2.0.0}
-    LIBTORCH_URL="https://download.pytorch.org/libtorch/${CUDA_TAG}/libtorch-shared-with-deps-${PYTORCH_VERSION}%2B${CUDA_TAG}.zip"
+
+    # Construct the LIBTORCH_URL dynamically
+    if [ "$CUDA_TAG" = "cpu" ]; then
+        LIBTORCH_URL="https://download.pytorch.org/libtorch/cpu/libtorch-shared-with-deps-${PYTORCH_VERSION}%2Bcpu.zip"
+    else
+        LIBTORCH_URL="https://download.pytorch.org/libtorch/nightly/${CUDA_TAG}/libtorch-cxx11-abi-shared-with-deps-latest.zip"
+    fi
+	echo $LIBTORCH_URL
 
     # Persist LIBTORCH_URL in ~/.bashrc
     if ! grep -q "export LIBTORCH_URL=" ~/.bashrc; then
