@@ -1,13 +1,5 @@
 #include "remote_gpu_extension.h"
 
-/*
-#include <torch/csrc/Device.h>
-#include <torch/csrc/utils/device_guard.h>
-#include <torch/csrc/utils/device.h>
-*/
-
-#include <iostream>
-
 namespace remote_gpu {
 
 // Placeholder for your remote server communication functions
@@ -44,38 +36,22 @@ at::Tensor forward_add(const at::Tensor& a, const at::Tensor& b) {
 }
 
 void register_remote_gpu_device() {
-    // Get the current number of GPUs.
-    // This method will be used to determine the index of our custom device.
-    auto num_gpus = at::cuda::getNumGPUs();
+    // Register dispatch keys
+    static auto register_remote_gpu = torch::RegisterOperators()
+        .op("remote_gpu::add", &remote_add)
+        .op("remote_gpu::mul", &remote_mul);
 
-    // Define our custom device type.
-    // Our device type name must satisfy the regular expression [a-z]+[a-z0-9_]*
-    // i.e., it must match the pattern '[a-z]+[a-z0-9_]*'.
-    const std::string device_type = "remote";
-
-    // Set the device index to be the current number of GPUs.
-    const auto device_index = num_gpus;
-
-    // Get the current number of registered devices.
-    // This will be used to determine the index of our custom device.
-    const int device_count = c10::Device::MaxDeviceType;
-
-    // Create a new device guard.
-    // This will be used to register our custom device.
-    auto* device_guard = new c10::SafeTypeRegistry<c10::Device::Type, c10::Device>(
-        c10::Device::Type::CUDA, device_count);
-
-    // Register our custom device.
-    c10::Device::registerType(device_type, device_guard);
-
-    // Print the registered device information.
-    std::cout << "Registered device: " << c10::Device(device_type, device_index) << std::endl;
+    // Register device type
+    c10::DeviceType::registerDeviceType(kRemoteGPUType);
 }
+
 
 // Register the device when the extension is loaded
 TORCH_LIBRARY_INIT(remote_gpu_ops, m) {
     register_remote_gpu_device();
-    m.def("forward_add", &forward_add);
+
+		// Register core operations
+    m.def("forward_add(Tensor a, Tensor b) -> Tensor", &remote_gpu::forward_add);
 }
 
 } // namespace remote_gpu
