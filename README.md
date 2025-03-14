@@ -58,7 +58,7 @@ This script will:
 
 2. Build the project
     ```bash
-    bazel build //...
+    bazel build //:remote_cuda
     ```
 3. Run the examples:
 	Start the remote server:
