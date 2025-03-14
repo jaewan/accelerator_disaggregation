@@ -1,0 +1,8 @@
+torch==2.5.1
+grpcio>=1.46.0
+protobuf>=4.25.0
+triton
+numpy>=1.20.0
+sympy>=1.10.0
+jinja2
+pip-tools

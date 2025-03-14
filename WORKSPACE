@@ -16,9 +16,9 @@ http_archive(
 # Load rules_python
 http_archive(
     name = "rules_python",
-    sha256 = "9d04041ac92a0985e344235f5d946f71ac543f1b1565f2cdbc9a2aaee8adf55b",
-    strip_prefix = "rules_python-0.26.0",
-    url = "https://github.com/bazelbuild/rules_python/releases/download/0.26.0/rules_python-0.26.0.tar.gz",
+    sha256 = "5868e73107a8e85d8f323806e60cad7283f34b32163ea6ff1020cf27abef6036",
+    strip_prefix = "rules_python-0.25.0",
+    url = "https://github.com/bazelbuild/rules_python/releases/download/0.25.0/rules_python-0.25.0.tar.gz",
 )
 
 # Initialize rules_python
@@ -43,6 +43,14 @@ pip_parse(
     name = "pip",
     python_interpreter_target = interpreter,
     requirements_lock = "//:requirements.txt",
+)
+
+pip_parse(
+    name = "pip_deps",
+    requirements_lock = "//:requirements.txt",
+    extra_pip_args = [
+        "--extra-index-url=https://download.pytorch.org/whl/cu121"
+    ],
 )
 
 load("@pip//:requirements.bzl", "install_deps")
@@ -72,6 +80,34 @@ http_archive(
     urls = ["https://github.com/pybind/pybind11/archive/v2.11.1.tar.gz"],
 )
 
+# Load rules_proto
+http_archive(
+    name = "rules_proto",
+    sha256 = "dc3fb206a2cb3441b485eb1e423165b231235a1ea9b031b4433cf7bc1fa460dd",
+    strip_prefix = "rules_proto-5.3.0-21.7",
+    urls = [
+        "https://github.com/bazelbuild/rules_proto/archive/refs/tags/5.3.0-21.7.tar.gz",
+    ],
+)
+
+load("@rules_proto//proto:repositories.bzl", "rules_proto_dependencies", "rules_proto_toolchains")
+rules_proto_dependencies()
+rules_proto_toolchains()
+
+# gRPC
+http_archive(
+    name = "com_github_grpc_grpc",
+    sha256 = "916f88a34f06b56432611aaa8c55befee96d0a7b7d7457733b9deeacbc016f99", 
+    strip_prefix = "grpc-1.59.1",
+    urls = ["https://github.com/grpc/grpc/archive/v1.59.1.tar.gz"],
+)
+
+load("@com_github_grpc_grpc//bazel:grpc_deps.bzl", "grpc_deps")
+grpc_deps()
+
+load("@com_github_grpc_grpc//bazel:grpc_extra_deps.bzl", "grpc_extra_deps")
+grpc_extra_deps()
+
 # Load libtorch
 load("//:libtorch.bzl", "libtorch_repository")
 libtorch_repository(
@@ -79,13 +115,21 @@ libtorch_repository(
     cuda = "auto",
     torch_version = "2.5.1",
 )
-# Load the libtorch_repository rule
-#load("//:libtorch_repository.bzl", "libtorch_repository")
 
-# Define the libtorch repository
-#libtorch_repository(
-#    name = "libtorch",
-#    pytorch_version = "2.5.1",  # Specify the desired PyTorch version
-#    cuda_tag = "cu121",         # Specify the CUDA tag (e.g., "cu121" for CUDA 12.1, "cpu" for CPU-only)
-#    sha256 = "",  # Optional: Add SHA256 for verification
-#)
+# absl
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "com_google_absl",
+    urls = ["https://github.com/abseil/abseil-cpp/archive/refs/tags/20230802.0.tar.gz"],
+    strip_prefix = "abseil-cpp-20230802.0",
+    sha256 = "3e5cfea7bbf3e7e6b3d7e4d07d0dbb60a32a9e3eee3e21ec3a5e5b7a4a1da27d",
+)
+
+http_archive(
+    name = "spdlog",
+    urls = ["https://github.com/gabime/spdlog/archive/v1.12.0.tar.gz"],
+    strip_prefix = "spdlog-1.12.0",
+    sha256 = "4dccf2d10f410c1e2feaff89966bfc49a1abb29ef6f08246335b110e001e09a9",
+    build_file = "//:spdlog.BUILD", 
+)

@@ -58,7 +58,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             echo -e "${RED}Unknown option: $1${NC}"
-            show_help
+           show_help
             exit 1
             ;;
     esac
@@ -104,20 +104,49 @@ check_bazel() {
 
 # Function to set up Python environment
 setup_python() {
-    if [ -d ".venv" ]; then
-        echo -e "${GREEN}Python virtual environment already exists. Skipping creation.${NC}"
+    # Use Python 3.10 specifically
+    PYTHON_CMD="python3.10"
+
+    # Check if Python 3.10 is available
+    if ! command -v $PYTHON_CMD &> /dev/null; then
+        echo -e "${RED}Python 3.10 is required but not found. Please install Python 3.10.${NC}"
+        exit 1
+    fi
+
+    # Rest of function with $PYTHON_CMD instead of python3
+    # Check if requirements have changed by using MD5 hash
+    REQ_HASH_FILE=".requirements.md5"
+    CURRENT_HASH=$(md5sum requirements.txt | cut -d ' ' -f 1)
+    REQUIREMENTS_CHANGED=false
+
+    # Check if hash file exists and if hash has changed
+    if [ ! -f "$REQ_HASH_FILE" ] || [ "$(cat $REQ_HASH_FILE)" != "$CURRENT_HASH" ]; then
+        REQUIREMENTS_CHANGED=true
+    fi
+
+    if [ -d ".venv" ] && [ "$REQUIREMENTS_CHANGED" = false ]; then
+        echo -e "${GREEN}Python virtual environment exists and requirements.txt hasn't changed.${NC}"
     else
-        echo -e "${GREEN}Creating Python virtual environment...${NC}"
-        python3 -m venv .venv
-        source .venv/bin/activate
+        if [ -d ".venv" ]; then
+            echo -e "${YELLOW}requirements.txt has changed. Updating virtual environment...${NC}"
+            source .venv/bin/activate
+        else
+            echo -e "${GREEN}Creating Python virtual environment...${NC}"
+            $PYTHON_CMD -m venv .venv
+            source .venv/bin/activate
+        fi
+
         echo -e "${GREEN}Upgrading pip...${NC}"
         pip install --upgrade pip
+
         echo -e "${GREEN}Installing Python dependencies...${NC}"
         pip install -r requirements.txt
+
+        # Save new hash
+        echo "$CURRENT_HASH" > "$REQ_HASH_FILE"
     fi
 }
 
-# Function to detect CUDA version
 # Function to detect CUDA version
 detect_cuda_version() {
     if [ "$SKIP_CUDA" = true ]; then
@@ -231,13 +260,12 @@ install_libtorch() {
 main() {
     if [ "$CLEAN" = true ]; then
         echo -e "${YELLOW}Cleaning up dependencies...${NC}"
-        rm -rf .venv libtorch
+        rm -rf .venv libtorch .requirements.md5
     fi
 
     echo -e "${GREEN}Starting setup...${NC}"
     check_bazel
     setup_python
-    #install_libtorch #Have bazel to install libtorch instead of bootstrap.sh
 
     echo -e "\n${GREEN}All dependencies are installed successfully!${NC}"
     echo -e "${GREEN}To activate the virtual environment, run: source .venv/bin/activate${NC}"

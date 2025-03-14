@@ -13,10 +13,3 @@ build --python_path="/usr/bin/python3"
 # CUDA configurations
 build:cuda --define=use_cuda=true
 build:cpu --define=use_cuda=false
-
-# Default to CPU if not specified
-build --config=cpu
-
-# Add debug options
-build:debug --compilation_mode=dbg
-build:debug --strip=never

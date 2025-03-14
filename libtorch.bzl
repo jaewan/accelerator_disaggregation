@@ -69,6 +69,7 @@ cc_library(
     ],
     deps = ["@local_config_python//:python_headers"],
     copts = [
+        "-std=c++17",  
         "-D_GLIBCXX_USE_CXX11_ABI=0",
         "-DTORCH_API_INCLUDE_EXTENSION_H",
         "-fPIC",
