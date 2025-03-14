@@ -109,7 +109,7 @@ load("@com_github_grpc_grpc//bazel:grpc_extra_deps.bzl", "grpc_extra_deps")
 grpc_extra_deps()
 
 # Load libtorch
-load("//:libtorch.bzl", "libtorch_repository")
+load("//third_party:libtorch.bzl", "libtorch_repository")
 libtorch_repository(
     name = "libtorch",
     cuda = "auto",
@@ -131,5 +131,5 @@ http_archive(
     urls = ["https://github.com/gabime/spdlog/archive/v1.12.0.tar.gz"],
     strip_prefix = "spdlog-1.12.0",
     sha256 = "4dccf2d10f410c1e2feaff89966bfc49a1abb29ef6f08246335b110e001e09a9",
-    build_file = "//:spdlog.BUILD", 
+    build_file = "//third_party:spdlog.BUILD", 
 )
