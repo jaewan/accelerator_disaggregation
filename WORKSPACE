@@ -133,3 +133,16 @@ http_archive(
     sha256 = "4dccf2d10f410c1e2feaff89966bfc49a1abb29ef6f08246335b110e001e09a9",
     build_file = "//:spdlog.BUILD", 
 )
+
+new_local_repository(
+    name = "cuda_nvrtc",
+    path = ".venv/lib/python3.10/site-packages/nvidia/cuda_nvrtc",
+    build_file_content = """
+cc_import(
+    name = "libnvrtc_builtins",
+    shared_library = "lib/libnvrtc-builtins.so.12.1",
+    visibility = ["//visibility:public"],
+)
+""",
+)
+
