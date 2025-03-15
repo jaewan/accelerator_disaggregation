@@ -64,6 +64,7 @@ pybind_extension(
         ":remote_dispatch_lib",
         "@libtorch",
         "@spdlog//:spdlog",
+        "@cuda_nvrtc//:libnvrtc_builtins",
     ],
     copts = [
         "-std=c++17",
