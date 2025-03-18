@@ -2,7 +2,9 @@
 
 
 ## Introduction
-We present a novel accelerator disaggregation framework that leverages dynamic multiple dispatch to transparently offload PyTorch computations to remote accelerators. Our approach extends the computational graph interception capabilities of PyTorch's dispatcher system with a distributed lazy evaluation strategy. By combining transparent operation interception with a future-based execution model, we achieve both programmability and network efficiency without requiring modifications to user code.
+We present a novel accelerator disaggregation framework that leverages unified dispatcher to transparently offload PyTorch computations to remote accelerators.
+Our approach extends the computational graph interception capabilities of PyTorch's dispatcher system with a distributed future.
+By combining transparent operation interception with a future-based execution model, we achieve both programmability and network efficiency without requiring modifications to user code.
 
 ## Features
 **Transparency**: Custom Device Extension with Unified Dispatch
@@ -38,10 +40,6 @@ System strictly transfers the data when it is absolutely necessary.
 sudo apt-get update
 sudo apt-get install python3.10-dev
 ```
-**Fedora**:
-  ```bash
-  sudo dnf install python3.10-devel
-  ```
 **MacOS**:
   ```bash
   brew install python@3.10
@@ -52,23 +50,26 @@ sudo apt-get install python3.10-dev
     ./bootstrap.sh
     ```
 This script will:
-*Install Bazel if not present
-*Set up Python environment
-*Configure build dependencies
+- Install Bazel if not present
+- Set up Python environment
+- Configure build dependencies
 
 2. Build the project
     ```bash
+	source .venv/bin/activate
     bazel build //:remote_cuda
     ```
-3. Run the examples:
-	Start the remote server:
-		```bash
-		bazel run //:remote_server
-		```
-	In a separate terminal, run the example client:
-		```bash
-		bazel run //:basic_example
-		```
+
+3. If build fails, try
+    ```
+	source .venv/bin/activate
+	rm requirements.txt
+    pip-compile --extra-index-url=https://download.pytorch.org/whl/cu121 --output-file=requirements.txt requirements.in
+	deactivate
+	./bootstrap.sh
+	source .venv/bin/activate
+    bazel build //:remote_cuda
+    ```
 ## TODO
 ### Feature
 - Operation mapping: map Pytorch ops to remote execution
@@ -79,11 +80,6 @@ This script will:
 ### Optimization
 - Serialization efficiency
 - Optimize data transfer to remote GPU using DPDK
-
-### Project Management
-- Make bazel to use C++17. When you make an explicit error, it says Bazel uses C++14. It is likely because of gRPC using C++14.
-- Have libtorch.bzl and spdlog.BUILD in third\_party directory and modify BUILD accordingly
-- Separate tests to tests directory. Complete tests/BUILD working
 
 ### For Fully Open Source
 - Make our device type unique(contribute to Pytorch). Currently we use PrivateUse1 for prototype. Register a unique device type (This will involve contributing to PyTorch itself)
