@@ -70,6 +70,12 @@ This script will:
 	source .venv/bin/activate
     bazel build //:remote_cuda
     ```
+### Sample Run
+From root directory after build, run
+    ```
+	python test_device.py
+    ```
+
 ## TODO
 ### Feature
 - Operation mapping: map Pytorch ops to remote execution

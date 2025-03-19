@@ -243,6 +243,48 @@ at::Tensor handle_empty_strided(c10::IntArrayRef size, c10::IntArrayRef stride, 
 	return tensor;
 }
 
+//TODO(Yue) make this to return proxy tensor instead of actual tensor and see if it works
+at::Tensor test_handle_empty_strided(c10::IntArrayRef size, c10::IntArrayRef stride, c10::optional<at::ScalarType> dtype_opt, 
+		c10::optional<c10::Layout> layout_opt, c10::optional<c10::Device> device_opt, 
+		c10::optional<bool> pin_memory_opt) {
+	SPDLOG_INFO("[DEBUG] empty_strided called");
+	// Ensure the device is of type REMOTE_CUDA_TYPE
+	TORCH_CHECK(device_opt.has_value() && device_opt->type() == REMOTE_CUDA_TYPE, 
+			"empty_strided: Expected device of type REMOTE_CUDA_TYPE");
+
+	// 1. Determine the data type
+	at::ScalarType scalar_type = dtype_opt.value_or(at::kFloat);
+
+	// Validate layout
+	TORCH_CHECK(layout_opt.value_or(c10::kStrided) == c10::kStrided, 
+			"empty_strided: Only supports strided layout");
+	//TODO For now, we don't handle pinned memory
+	TORCH_CHECK(!pin_memory_opt.has_value() || !pin_memory_opt.value(), 
+			"empty_strided: Pinned memory is not supported on remote_cuda");
+
+	// 2. Calculate the total size in bytes
+	int64_t num_elements = 1;
+	for (int64_t dim : size) {
+		num_elements *= dim;
+	}
+	size_t element_size = at::elementSize(scalar_type);
+	size_t total_bytes = num_elements * element_size;
+
+	// 3. Allocate memory on the remote device
+	//    (This is where you'd communicate with your remote server)
+	void* remote_ptr = remote_allocate(total_bytes);
+
+	// 4. Construct a TensorOptions object
+	at::TensorOptions options;
+	options = options.dtype(scalar_type);
+	options = options.layout(layout_opt.value_or(at::kStrided));
+	options = options.device(device_opt.value_or(c10::Device(REMOTE_CUDA_TYPE, 0))); // Important: Specify your custom device
+
+	// 5. Create a tensor from the remote memory
+	at::Tensor tensor = at::from_blob(remote_ptr, size, stride, options);
+	return tensor;
+}
+
 at::Tensor handle_copy_from(const at::Tensor& self, const at::Tensor& dst, bool non_blocking) {
 	SPDLOG_INFO("[DEBUG] [Manual Kernel] copy_from called");
 	// Ensure the destination tensor is on your custom device
@@ -353,6 +395,7 @@ at::Tensor const& handle_resize_(at::Tensor const& self,
 	 }
 	 */
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
+	m.impl("empty_strided", remote_cuda::handle_empty_strided);
 	m.impl("_copy_from", remote_cuda::handle_copy_from);
 	m.impl("copy_", remote_cuda::handle_copy_);
 }
