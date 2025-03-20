@@ -39,6 +39,7 @@ System strictly transfers the data when it is absolutely necessary.
 ```bash
 sudo apt-get update
 sudo apt-get install python3.10-dev
+sudo apt-get install -y dpdk dpdk-dev libdpdk-dev
 ```
 **MacOS**:
   ```bash
