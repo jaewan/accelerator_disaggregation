@@ -133,3 +133,13 @@ http_archive(
     sha256 = "4dccf2d10f410c1e2feaff89966bfc49a1abb29ef6f08246335b110e001e09a9",
     build_file = "//third_party:spdlog.BUILD", 
 )
+
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+http_archive(
+    name = "rules_cuda",
+    strip_prefix = "rules_cuda-f7cbf72d1834ea4c7f2e56b9c472db4ee08f4902",
+    urls = ["https://github.com/bazel-contrib/rules_cuda/archive/f7cbf72d1834ea4c7f2e56b9c472db4ee08f4902.tar.gz"],
+)
+load("@rules_cuda//cuda:repositories.bzl", "rules_cuda_dependencies", "rules_cuda_toolchains")
+rules_cuda_dependencies()
+rules_cuda_toolchains(register_toolchains = True)
