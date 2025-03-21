@@ -2,61 +2,69 @@ import torch
 import remote_cuda
 import unittest
 
-class TestRemoteCUDA():
-    def __init__(self):
-        self.device = remote_cuda.REMOTE_CUDA
-
+class TestRemoteCUDA(unittest.TestCase):
+    
+    @classmethod
+    def setUpClass(cls):
+        cls.device_remote = remote_cuda.REMOTE_CUDA
+        cls.device_cuda = "cuda" if torch.cuda.is_available() else "cpu"
+    
     def test_basic_operations(self):
         # Test tensor creation
-        a = torch.tensor([1.0, 2.0, 3.0], device=self.device)
-        print("1")
-        b = torch.tensor([4.0, 5.0, 6.0], device=self.device)
-        print("2")
-
+        a_cuda = torch.tensor([1.0, 2.0, 3.0], device=self.device_cuda)
+        b_cuda = torch.tensor([4.0, 5.0, 6.0], device=self.device_cuda)
+        
+        a_remote = torch.tensor([1.0, 2.0, 3.0], device=self.device_remote)
+        b_remote = torch.tensor([4.0, 5.0, 6.0], device=self.device_remote)
+        
         # Test basic arithmetic
-        c = a + b  # Should intercept add
-        d = a * b  # Should intercept multiply
-
+        c_cuda = a_cuda + b_cuda
+        c_remote = a_remote + b_remote # Should intercept add
+        self.assertTrue(torch.equal(c_cuda, c_remote), "Addition mismatch")
+        
+        d_cuda = a_cuda * b_cuda
+        d_remote = a_remote * b_remote # Should intercept multiply
+        self.assertTrue(torch.equal(d_cuda, d_remote), "Multiplication mismatch")
+        
         # Test more complex operations
-        e = torch.matmul(a, b)  # Should intercept matmul
-        f = torch.nn.functional.relu(a)  # Should intercept relu
-    def A(self):
-        a = torch.tensor([1.0, 2.0, 3.0], device=self.device)
-        print("1", a.device)
-        b = torch.tensor([4.0, 5.0, 6.0], device=self.device)
-        print("2")
-
-        # Test basic arithmetic
-        c = a + b  # Should intercept add
-
-    def B(self):
-        a = torch.tensor([1.0, 2.0, 3.0], device=self.device)
-
+        e_cuda = torch.matmul(a_cuda, b_cuda)
+        e_remote = torch.matmul(a_remote, b_remote) # Should intercept matmul
+        self.assertTrue(torch.equal(e_cuda, e_remote), "Matmul mismatch")
+        
+        f_cuda = torch.nn.functional.relu(a_cuda)
+        f_remote = torch.nn.functional.relu(a_remote) # Should intercept relu
+        self.assertTrue(torch.equal(f_cuda, f_remote), "ReLU mismatch")
+    
     def test_tensor_create(self):
         # Instead of creating tensors directly on the device:
         # a = torch.tensor([1.0, 2.0, 3.0], device=self.device)
-
-        # Create on CPU first, then move to your device:
-        a = torch.tensor([1.0, 2.0, 3.0])
-        a = a.to(self.device)
-
-        b = torch.tensor([4.0, 5.0, 6.0])
-        b = b.to(self.device)
-
-        # Test operations as before
-        c = a + b
-        # ...
-
+        # Create tensor on CPU first and move to devices
+        a_cpu = torch.tensor([1.0, 2.0, 3.0])
+        a_cuda = a_cpu.to(self.device_cuda)
+        a_remote = a_cpu.to(self.device_remote)
+        
+        b_cpu = torch.tensor([4.0, 5.0, 6.0])
+        b_cuda = b_cpu.to(self.device_cuda)
+        b_remote = b_cpu.to(self.device_remote)
+        
+        c_cuda = a_cuda + b_cuda
+        c_remote = a_remote + b_remote
+        self.assertTrue(torch.equal(c_cuda, c_remote), "Tensor creation or addition mismatch")
+    
     def test_local_operations(self):
         # Test operations that should run locally
-        a = torch.tensor([1.0], device=self.device)
-        size = a.size()  # Should be in kLocalOps
-        device = a.device  # Should be in kLocalOps
+        a_remote = torch.tensor([1.0], device=self.device_remote)
+        self.assertEqual(a_remote.size(), torch.Size([1]), "Size mismatch")  # Should be in kLocalOps
+        self.assertEqual(a_remote.item(), 1.0, "Item mismatch")  # item() should return scalar value
+        self.assertTrue(torch.equal(a_remote.clone(), a_remote), "Clone mismatch")  # Cloned tensor should be identical
 
     def test_device_transfer(self):
         # Test device transfer handling
         cpu_tensor = torch.tensor([1.0, 2.0, 3.0])
-        remote_tensor = cpu_tensor.to(self.device)
+        remote_tensor = cpu_tensor.to(self.device_remote)
+        cuda_tensor = cpu_tensor.to(self.device_cuda)
+        self.assertTrue(torch.equal(cuda_tensor, remote_tensor), "Device transfer mismatch")
 
-test = TestRemoteCUDA()
-test.test_basic_operations()
+if __name__ == "__main__":
+    unittest.main()
+
