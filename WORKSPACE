@@ -134,9 +134,50 @@ http_archive(
     build_file = "//third_party:spdlog.BUILD", 
 )
 
-# DPDK
+# DPDK main headers
 new_local_repository(
     name = "dpdk",
-    path = "/usr/local",  # Adjust if your DPDK is installed elsewhere
-    build_file = "//third_party:dpdk_system.BUILD",
+    path = "/usr/include/dpdk",  # DPDK include path
+    build_file = "//third_party:dpdk.BUILD",
+)
+
+# DPDK build configuration
+new_local_repository(
+    name = "dpdk_config",
+    path = "/usr/include/x86_64-linux-gnu/dpdk",  # Path to rte_build_config.h
+    build_file_content = """
+cc_library(
+    name = "dpdk_config",
+    hdrs = ["rte_build_config.h"],
+    visibility = ["//visibility:public"],
+)
+""",
+)
+
+# DPDK architecture-specific headers
+new_local_repository(
+    name = "dpdk_arch",
+    path = "/usr/include/x86_64-linux-gnu",  # Architecture-specific include path
+    build_file_content = """
+cc_library(
+    name = "dpdk_arch",
+    includes = ["."],
+    visibility = ["//visibility:public"],
+)
+""",
+)
+
+# DPDK build headers
+new_local_repository(
+    name = "dpdk_build",
+    path = "/usr/include/x86_64-linux-gnu/dpdk",  # Path to DPDK build headers
+    build_file_content = """
+cc_library(
+    name = "dpdk_build",
+    hdrs = glob(["*.h"]),  # Include all header files
+    strip_include_prefix = ".",  # This makes headers available without prefix
+    includes = ["."],
+    visibility = ["//visibility:public"],
+)
+""",
 )
