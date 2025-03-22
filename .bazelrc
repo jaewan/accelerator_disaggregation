@@ -4,6 +4,14 @@ build --copt='-D_GLIBCXX_USE_CXX11_ABI=0'
 build --copt=-O3
 build --copt=-march=native
 
+# Set default number of parallel jobs to 16
+build --jobs=16
+
+# Optional: Also set local CPU resources if needed
+build --local_cpu_resources=16
+#build --disk_cache=.bazel-cache
+
+
 # Test options
 test --test_output=errors
 

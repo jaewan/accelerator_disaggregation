@@ -134,6 +134,7 @@ http_archive(
     build_file = "//third_party:spdlog.BUILD", 
 )
 
+
 load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
 http_archive(
     name = "rules_cuda",
@@ -143,3 +144,10 @@ http_archive(
 load("@rules_cuda//cuda:repositories.bzl", "rules_cuda_dependencies", "rules_cuda_toolchains")
 rules_cuda_dependencies()
 rules_cuda_toolchains(register_toolchains = True)
+
+# DPDK
+new_local_repository(
+    name = "dpdk",
+    path = "/usr/local",  # Adjust if your DPDK is installed elsewhere
+    build_file = "//third_party:dpdk_system.BUILD",
+)
