@@ -94,3 +94,32 @@ py_binary(
         requirement("torch"),
     ],
 )
+
+load("@rules_cuda//cuda:defs.bzl", "cuda_library")
+
+cuda_library(
+    name = "benchmark_library",
+    srcs = [
+        "benchmark/server-runner.cu",
+        "benchmark/common.h"]
+)
+
+cc_binary(
+    name = "benchmark_server",
+    srcs = [
+        "benchmark/server.cc",
+        "benchmark/common.cc",
+        "benchmark/common.h",
+        "benchmark/server-runner.h"],
+    #copts = ["-x cuda"],
+    linkopts = ["-lcudart"],
+    deps = ["benchmark_library"]
+)
+
+cc_binary(
+    name = "benchmark_client",
+    srcs = [
+        "benchmark/client.cc",
+        "benchmark/common.cc",
+        "benchmark/common.h"]
+)
