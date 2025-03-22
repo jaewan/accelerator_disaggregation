@@ -72,10 +72,14 @@ This script will:
     ```
 
 ## Test
+
 From root directory after build, run
-    ```
-	bazel test //tests:test_device
-    ```
+```
+# Run all tests
+bazel test //tests:*
+# Run one specific test target
+bazel test //tests:test_device
+```
 
 ## TODO
 ### Feature

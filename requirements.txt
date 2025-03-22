@@ -6,6 +6,8 @@
 #
 --extra-index-url https://download.pytorch.org/whl/cu121
 
+exceptiongroup==1.2.2
+    # via pytest
 filelock==3.17.0
     # via
     #   torch
@@ -14,6 +16,8 @@ fsspec==2025.2.0
     # via torch
 grpcio==1.70.0
     # via -r requirements.in
+iniconfig==2.1.0
+    # via pytest
 jinja2==3.1.5
     # via
     #   -r requirements.in
@@ -57,12 +61,20 @@ nvidia-nvjitlink-cu12==12.8.61
     #   nvidia-cusparse-cu12
 nvidia-nvtx-cu12==12.1.105
     # via torch
+packaging==24.2
+    # via pytest
+pluggy==1.5.0
+    # via pytest
 protobuf==5.29.3
+    # via -r requirements.in
+pytest==8.3.5
     # via -r requirements.in
 sympy==1.13.1
     # via
     #   -r requirements.in
     #   torch
+tomli==2.2.1
+    # via pytest
 torch==2.5.1+cu121
     # via -r requirements.in
 triton==3.1.0
