@@ -70,11 +70,16 @@ This script will:
 	source .venv/bin/activate
     bazel build //:remote_cuda
     ```
-### Sample Run
+
+## Test
+
 From root directory after build, run
-    ```
-	python test_device.py
-    ```
+```
+# Run all tests
+bazel test //tests:*
+# Run one specific test target
+bazel test //tests:test_device
+```
 
 ## TODO
 ### Feature
