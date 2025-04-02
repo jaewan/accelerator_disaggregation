@@ -26,3 +26,13 @@ py_test(
     imports = [".."],
 )
 
+py_test(
+    name = "test_simple_model",
+    srcs = ["test_simple_model.py"],
+    deps = [
+        "//:remote_cuda",
+        requirement("pytest"),
+        requirement("numpy"),
+    ],
+    imports = [".."],
+)
