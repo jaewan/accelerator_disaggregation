@@ -41,6 +41,7 @@ cc_library(
         "@libtorch//:include/torch/csrc/api/include",
     ],
 	features = ["cpp17"],
+	linkopts = ["-luuid"],
 )
 
 cc_library(

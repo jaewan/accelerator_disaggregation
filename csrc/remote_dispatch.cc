@@ -5,6 +5,15 @@
 #include <c10/core/SymInt.h> 
 #include <ATen/native/CPUFallback.h>
 #include <c10/core/CPUAllocator.h>
+#include <pybind11/pybind11.h>
+#include <pybind11/embed.h>
+#include <uuid/uuid.h>
+#include <unordered_map>
+
+namespace py = pybind11;
+
+static std::unordered_map<void*, std::string> proxy_tensor_registry;
+static std::unordered_map<std::string, at::Tensor> proxy_tensor_registry_reverse;
 
 /*
  * Fallback works for operators that do not have a more specific kernel registered for PrivateUse1 device.
@@ -14,6 +23,18 @@
  */
 
 namespace remote_cuda {
+
+//static py::scoped_interpreter guard{}; 
+
+std::string generate_uuid() {
+    uuid_t uuid;
+    uuid_generate(uuid);
+    char uuid_str[37]; // 36 + null
+    uuid_unparse(uuid, uuid_str);
+    return std::string(uuid_str);
+}
+
+
 
 //TODO(Jae) complete this
 void* remote_allocate(size_t total_bytes){
@@ -240,7 +261,16 @@ at::Tensor handle_empty_strided(c10::IntArrayRef size, c10::IntArrayRef stride, 
 
 	// 5. Create a tensor from the remote memory
 	at::Tensor tensor = at::from_blob(remote_ptr, size, stride, options);
+	
 	return tensor;
+}
+
+std::string get_registered_remote_id(const at::Tensor& t) {
+    auto* impl = t.unsafeGetTensorImpl();
+    if (proxy_tensor_registry.count(impl)) {
+        return proxy_tensor_registry.at(impl);
+    }
+    return "NOT_FOUND";
 }
 
 //TODO(Yue) make this to return proxy tensor instead of actual tensor and see if it works
@@ -279,9 +309,21 @@ at::Tensor test_handle_empty_strided(c10::IntArrayRef size, c10::IntArrayRef str
 	options = options.dtype(scalar_type);
 	options = options.layout(layout_opt.value_or(at::kStrided));
 	options = options.device(device_opt.value_or(c10::Device(REMOTE_CUDA_TYPE, 0))); // Important: Specify your custom device
-
+        
+	std::cout << "\n[C++] test_handle_empty_strided was called \n";
 	// 5. Create a tensor from the remote memory
 	at::Tensor tensor = at::from_blob(remote_ptr, size, stride, options);
+	
+	// ProxyTensor
+	std::string remote_id = generate_uuid();	
+	std::cout << "Registering remote tensor " << remote_id << std::endl;
+
+	// Register the tensor with its remote ID
+	proxy_tensor_registry[tensor.unsafeGetTensorImpl()] = remote_id;
+	proxy_tensor_registry_reverse[remote_id] = tensor;
+	// std::string tensor_id = proxy_tensor_registry[tensor.unsafeGetTensorImpl()];
+	// std::cout << "Tensor ID: " << tensor_id << std::endl;
+
 	return tensor;
 }
 
@@ -395,7 +437,7 @@ at::Tensor const& handle_resize_(at::Tensor const& self,
 	 }
 	 */
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
-	m.impl("empty_strided", remote_cuda::handle_empty_strided);
+	m.impl("empty_strided", remote_cuda::test_handle_empty_strided);
 	m.impl("_copy_from", remote_cuda::handle_copy_from);
 	m.impl("copy_", remote_cuda::handle_copy_);
 }

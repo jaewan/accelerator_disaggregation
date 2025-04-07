@@ -18,6 +18,7 @@ namespace remote_cuda {
 constexpr c10::DispatchKey REMOTE_CUDA_KEY = c10::DispatchKey::PrivateUse1;
 
 void register_dispatch_keys();
+std::string get_registered_remote_id(const at::Tensor& t);
 
 // Handle specific operation types
 at::Tensor handle_empty_strided(c10::IntArrayRef size, 
