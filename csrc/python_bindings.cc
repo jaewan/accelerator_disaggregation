@@ -34,4 +34,6 @@ PYBIND11_MODULE(remote_cuda_ext, m) {
 				"Register remote CUDA device type with PyTorch");
 		m.def("register_dispatch_keys", &remote_cuda::register_dispatch_keys,
 				"Register dispatcher keys for remote operations");
+		m.def("get_registered_remote_id", &remote_cuda::get_registered_remote_id,
+				"Get the registered remote ID for a tensor");
 }

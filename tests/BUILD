@@ -26,3 +26,13 @@ py_test(
     imports = [".."],
 )
 
+py_test(
+    name = "test_proxy",
+    srcs = ["test_proxy.py"],
+    deps = [
+        "//:remote_cuda",
+        requirement("torch"),
+	requirement("numpy"),
+    ],
+)
+

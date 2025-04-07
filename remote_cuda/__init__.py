@@ -3,6 +3,8 @@ from torch.utils.cpp_extension import load
 import importlib.util
 import os
 import sys
+import uuid
+from .remote_tensor import RemoteProxyTensor
 
 # Get the directory of the current file
 EXTENSION_NAME = "remote_cuda_ext"
@@ -87,6 +89,34 @@ def is_available():
     # Placeholder implementation
     return True
 
+def empty(*size, dtype=None, layout=torch.strided, device=None, requires_grad=False):
+    """Create a remote proxy tensor with uninitialized data."""
+    # print(f"[DEBUG] device = {device}, device.type = {device.type if device else 'None'}")
+    # if device is None or device.type != "privateuseone":
+    #    raise ValueError("Device must be remote_cuda (privateuseone)")
+    if device is None or device.type != torch.device("privateuseone").type:
+        raise ValueError(f"Device must be remote_cuda (privateuseone), got: {device}, type: {device.type}")
+
+    # Create a metadata-only tensor on CPU first
+    cpu_tensor = torch.empty(*size, dtype=dtype, layout=layout, device="cpu", 
+                            requires_grad=requires_grad)
+    
+    # print(f"[DEBUG] Created CPU tensor: {cpu_tensor}")
+
+    # Generate a remote ID
+    # remote_id = str(uuid.uuid4())
+    
+    # Register an empty tensor on the remote server
+    # This would call into your C++ extension
+    # _ext.register_remote_tensor(remote_id, size, dtype, layout)
+    
+    # Return a proxy that points to the remote tensor
+    mv_tensor = cpu_tensor.to(device)
+    remote_id = _ext.get_registered_remote_id(mv_tensor)
+    print(remote_id)
+    
+    return RemoteProxyTensor(mv_tensor, remote_id)
+
 # Make remote_cuda a module in torch
 class RemoteCudaModule:
     def __init__(self):
@@ -94,6 +124,8 @@ class RemoteCudaModule:
         self.__version__ = "0.1.0"
         self.device = REMOTE_CUDA
         self.name = REMOTE_CUDA
+        self.empty = empty  # Add the empty function
+        self.RemoteProxyTensor = RemoteProxyTensor  # Expose the proxy class
 
 torch._register_device_module("remote_cuda", RemoteCudaModule())
 
@@ -111,3 +143,10 @@ if hasattr(torch.ops, 'load_library'):
 # Initialize the device with PyTorch alternatively from python_bindings.cc
 #_ext.register_device()
 #_ext.register_dispatch_keys()
+
+# Import core symbols
+from .remote_tensor import RemoteProxyTensor
+
+# Expose remote_cuda for tests and modules
+remote_cuda = torch.remote_cuda
+
