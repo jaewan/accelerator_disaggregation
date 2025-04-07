@@ -144,9 +144,6 @@ if hasattr(torch.ops, 'load_library'):
 #_ext.register_device()
 #_ext.register_dispatch_keys()
 
-# Import core symbols
-from .remote_tensor import RemoteProxyTensor
-
 # Expose remote_cuda for tests and modules
 remote_cuda = torch.remote_cuda
 
