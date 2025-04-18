@@ -386,4 +386,5 @@ class TestRemoteCUDA:
 if __name__ == "__main__":
     # To run a specific test directly: 
     # python -m tests.test_remote_cuda TestRemoteCUDA.test_import_and_constants
-    pytest.main(["-xvs", __file__])
+    sys.exit(pytest.main(["-xvs", __file__]))
+
