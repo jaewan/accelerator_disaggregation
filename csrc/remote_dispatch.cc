@@ -74,6 +74,8 @@ at::Tensor change_tensor_device_to_remote_cuda(at::Tensor &cpu_result){
 }
 
 void execute_op_test(const c10::OperatorHandle& op, c10::Stack* stack) {
+	SPDLOG_INFO("test fallback called : {}", op.schema().name());
+	
     // Determine the start index of arguments on the stack
     const auto& schema_args = op.schema().arguments();
     const size_t num_args = schema_args.size();
