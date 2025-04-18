@@ -74,65 +74,128 @@ at::Tensor change_tensor_device_to_remote_cuda(at::Tensor &cpu_result){
 }
 
 void execute_op_test(const c10::OperatorHandle& op, c10::Stack* stack) {
-	SPDLOG_INFO("test fallback called : {}", op.schema().name());
-	// 1. Copy input tensors to CPU
-	std::vector<at::Tensor> cpu_input_tensors;
-	for (auto& item : *stack) {
-		if (item.isTensor()) {
-			at::Tensor tensor = item.toTensor();
-			if (tensor.device().type() == REMOTE_CUDA_TYPE) {
-				cpu_input_tensors.push_back(tensor.cpu()); // Copy to CPU
-			} else {
-				cpu_input_tensors.push_back(tensor); // Keep CPU tensors as is
-			}
-		} else if (item.isTensorList()) {
-			auto tensorList = item.toTensorList();
-			std::vector<at::Tensor> newTensorList;
-			for (const auto& tensorItemRef : tensorList) {
-				c10::IValue tensorItem = c10::IValue(tensorItemRef);
-				if (tensorItem.isTensor()) {
-					at::Tensor tensor = tensorItem.toTensor();
-					if (tensor.device().type() == REMOTE_CUDA_TYPE) {
-						newTensorList.push_back(tensor.cpu());
-					} else {
-						newTensorList.push_back(tensor);
-					}
-				}
-			}
-			item = newTensorList;
-		}
-	}
+    // Determine the start index of arguments on the stack
+    const auto& schema_args = op.schema().arguments();
+    const size_t num_args = schema_args.size();
+    const size_t args_begin = stack->size() - num_args;
+    auto args = torch::jit::last(stack, num_args);
 
-	// 2. Replace input tensors in stack with CPU copies
-	size_t cpu_tensor_index = 0;
-	for (auto& item : *stack) {
-		if (item.isTensor()) {
-			item = cpu_input_tensors[cpu_tensor_index++];
-		}
-	}
+    // Containers for single-tensor inputs
+    std::vector<int> tensor_indices;
+    std::vector<at::Tensor> remote_tensors;
+    std::vector<at::Tensor> cpu_tensors;
 
-	// 3. Redispatch to CPU
-	op.redispatchBoxed(c10::DispatchKeySet(at::DispatchKey::CPU), stack);
+    // Containers for TensorList inputs
+    std::vector<int> list_indices;
+    std::vector<std::vector<at::Tensor>> remote_lists;
+    std::vector<std::vector<at::Tensor>> cpu_lists;
 
-	// 4. Change output tensors back to REMOTE_CUDA_TYPE
-	for (auto& item : *stack) {
-		if (item.isTensor()) {
-			at::Tensor tensor = item.toTensor();
-			item = change_tensor_device_to_remote_cuda(tensor);
-		} else if (item.isTensorList()) {
-			auto tensorList = item.toTensorList();
-			std::vector<at::Tensor> newTensorList;
-			for (const auto& tensorItemRef : tensorList) {
-				c10::IValue tensorItem = c10::IValue(tensorItemRef);
-				if (tensorItem.isTensor()) {
-					at::Tensor tensor = tensorItem.toTensor();
-					newTensorList.push_back(change_tensor_device_to_remote_cuda(tensor));
-				}
-			}
-			item = newTensorList;
-		}
-	}
+    // Optional Device argument (if present)
+    std::optional<c10::Device> tgt_device;
+
+    // Step 1: Convert all REMOTE_CUDA tensors/lists to CPU
+    for (size_t idx = 0; idx < args.size(); ++idx) {
+        auto& iv = args[idx];
+        // Handle Device arguments
+        if (iv.isDevice()) {
+            tgt_device = iv.toDevice();
+            (*stack)[args_begin + idx] = c10::IValue(c10::Device(c10::DeviceType::CPU));
+            continue;
+        }
+        // Handle single Tensor
+        if (iv.isTensor()) {
+            auto t = iv.toTensor();
+            if (t.device().type() == REMOTE_CUDA_TYPE) {
+                tensor_indices.push_back(idx);
+                remote_tensors.push_back(t);
+                cpu_tensors.push_back(t.cpu());
+                (*stack)[args_begin + idx] = c10::IValue(cpu_tensors.back());
+            }
+        }
+        // Handle TensorList
+        else if (iv.isTensorList()) {
+            auto tl = iv.toTensorList().vec();
+            bool has_remote = false;
+            std::vector<at::Tensor> cpu_list;
+            cpu_list.reserve(tl.size());
+            for (auto& t : tl) {
+                if (t.device().type() == REMOTE_CUDA_TYPE) {
+                    has_remote = true;
+                    cpu_list.push_back(t.cpu());
+                } else {
+                    cpu_list.push_back(t);
+                }
+            }
+            if (has_remote) {
+                list_indices.push_back(idx);
+                remote_lists.push_back(std::move(tl));
+                cpu_lists.push_back(cpu_list);
+                (*stack)[args_begin + idx] = c10::IValue(c10::List<at::Tensor>(cpu_list));
+            }
+        }
+    }
+
+    // Step 2: Call the CPU implementation
+    op.redispatchBoxed(c10::DispatchKeySet(c10::DispatchKey::CPU), stack);
+
+    // Step 3a: Sync in-place writes for single-tensor inputs
+    for (size_t i = 0; i < tensor_indices.size(); ++i) {
+        int idx = tensor_indices[i];
+        const auto* alias_info = schema_args[idx].alias_info();
+        if (alias_info && alias_info->isWrite()) {
+            auto& cpu_t = cpu_tensors[i];
+            auto& orig  = remote_tensors[i];
+            if (cpu_t.defined() && orig.defined()) {
+                at::_copy_from_and_resize(cpu_t, orig);
+            }
+        }
+    }
+
+    // Step 3b: Sync in-place writes for TensorList inputs
+    for (size_t i = 0; i < list_indices.size(); ++i) {
+        int idx = list_indices[i];
+        const auto* alias_info = schema_args[idx].alias_info();
+        if (alias_info && alias_info->isWrite()) {
+            const auto& cpu_list = cpu_lists[i];
+            auto& orig_list = remote_lists[i];
+            for (size_t j = 0; j < orig_list.size(); ++j) {
+                const auto& cpu_t = cpu_list[j];
+                auto& orig_t = orig_list[j];
+                if (cpu_t.defined() && orig_t.defined()) {
+                    at::_copy_from_and_resize(cpu_t, orig_t);
+                }
+            }
+        }
+    }
+
+    // Step 4: Convert outputs back to REMOTE_CUDA device
+    const auto& schema_rets = op.schema().returns();
+    const size_t num_rets = schema_rets.size();
+    const size_t rets_begin = stack->size() - num_rets;
+    if (!tgt_device.has_value() && !remote_tensors.empty()) {
+        tgt_device = remote_tensors[0].device();
+    }
+    for (size_t i = 0; i < num_rets; ++i) {
+        auto& ov = (*stack)[rets_begin + i];
+        if (!tgt_device.has_value()) continue;
+        // Single Tensor output
+        if (ov.isTensor() && ov.toTensor().defined()) {
+            auto out_cpu = ov.toTensor();
+            ov = c10::IValue(change_tensor_device_to_remote_cuda(out_cpu));
+        }
+        // TensorList output
+        else if (ov.isTensorList()) {
+            auto tl = ov.toTensorList().vec();
+            std::vector<at::Tensor> new_list;
+            new_list.reserve(tl.size());
+            for (auto& t : tl) {
+                new_list.push_back(change_tensor_device_to_remote_cuda(t));
+            }
+            ov = c10::IValue(c10::List<at::Tensor>(new_list));
+        }
+    }
 }
+
 
 // Function to execute an operation on the remote server
 at::Tensor execute_op_remotely(const c10::OperatorHandle& op, c10::Stack* stack) {
@@ -287,20 +350,21 @@ at::Tensor test_handle_empty_strided(c10::IntArrayRef size, c10::IntArrayRef str
 
 at::Tensor handle_copy_from(const at::Tensor& self, const at::Tensor& dst, bool non_blocking) {
 	SPDLOG_INFO("[DEBUG] [Manual Kernel] copy_from called");
-	// Ensure the destination tensor is on your custom device
-	TORCH_CHECK(dst.device().type() == c10::DeviceType::PrivateUse1,
-			"_copy_from: Destination tensor must be on the REMOTE_CUDA device");
+	// // Ensure the destination tensor is on your custom device
+	// TORCH_CHECK(dst.device().type() == c10::DeviceType::PrivateUse1,
+	// 		"_copy_from: Destination tensor must be on the REMOTE_CUDA device");
 
-	// Ensure the source tensor is not on your custom device
-	TORCH_CHECK(self.device().type() != c10::DeviceType::PrivateUse1,
-			"_copy_from: Source tensor must not be on the REMOTE_CUDA device");
+	// // Ensure the source tensor is not on your custom device
+	// TORCH_CHECK(self.device().type() != c10::DeviceType::PrivateUse1,
+	// 		"_copy_from: Source tensor must not be on the REMOTE_CUDA device");
 
 	// 1. Serialize the source tensor's data
 	const void* src_data = self.data_ptr();
 	size_t src_num_bytes = self.nbytes();
 
 	// For demonstration, log the copy operation
-	SPDLOG_INFO("[DEBUG] [Manual Kernel] Copying {} bytes from CPU to REMOTE_CUDA device", src_num_bytes);
+	SPDLOG_INFO("[DEBUG] [Manual Kernel] Copying {} bytes from {} to {}", 
+				src_num_bytes, self.device().str(), dst.device().str());
 
 	// 2. Allocate memory on the remote device (if not already allocated)
 	void* dest_data = dst.data_ptr();
@@ -312,6 +376,12 @@ at::Tensor handle_copy_from(const at::Tensor& self, const at::Tensor& dst, bool 
 	// 4. Return the destination tensor
 	return dst;
 }
+
+at::Tensor handle_copy_from_and_resize(const at::Tensor& self, const at::Tensor& dst) {
+	SPDLOG_INFO("[DEBUG] [Manual Kernel] copy_from_and_resize called");
+	return handle_copy_from(self, dst, false);
+}
+
 
 at::Tensor& handle_copy_(at::Tensor& self, const at::Tensor& src, bool non_blocking) {
 	SPDLOG_INFO("[DEBUG] [Manual Kernel] copy_ called");
@@ -397,7 +467,7 @@ at::Tensor const& handle_resize_(at::Tensor const& self,
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
 	m.impl("empty_strided", remote_cuda::handle_empty_strided);
 	m.impl("_copy_from", remote_cuda::handle_copy_from);
-	m.impl("copy_", remote_cuda::handle_copy_);
+	m.impl("_copy_from_and_resize", remote_cuda::handle_copy_from_and_resize);
 }
 
 TORCH_LIBRARY_IMPL(_, PrivateUse1, m) {
