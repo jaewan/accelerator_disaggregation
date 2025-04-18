@@ -27,6 +27,18 @@ py_test(
 )
 
 py_test(
+    name = "test_real_workload",
+    srcs = ["test_real_workload.py"],
+    deps = [
+        "//:remote_cuda",
+        requirement("pytest"),
+        requirement("numpy"),
+        requirement("torchvision"),
+    ],
+    imports = [".."],
+)
+
+py_test(
     name = "test_simple_model",
     srcs = ["test_simple_model.py"],
     deps = [
