@@ -48,3 +48,26 @@ py_test(
     ],
     imports = [".."],
 )
+
+py_test(
+    name = "test_simple_model_train",
+    srcs = ["test_simple_model_train.py"],
+    deps = [
+        "//:remote_cuda",
+        requirement("pytest"),
+        requirement("numpy"),
+    ],
+    imports = [".."],
+)
+
+py_test(
+    name = "test_bert_inference",
+    srcs = ["test_bert_inference.py"],
+    deps = [
+        "//:remote_cuda",
+        requirement("pytest"),
+        requirement("numpy"),
+        requirement("transformers"),
+    ],
+    imports = [".."],
+)
