@@ -5,6 +5,8 @@
 #include <c10/core/SymInt.h> 
 #include <ATen/native/CPUFallback.h>
 #include <c10/core/CPUAllocator.h>
+#include "proto/remote_execution.grpc.pb.h"
+#include <grpcpp/grpcpp.h>
 
 /*
  * Fallback works for operators that do not have a more specific kernel registered for PrivateUse1 device.
@@ -202,7 +204,8 @@ void execute_op_test(const c10::OperatorHandle& op, c10::Stack* stack) {
 remote_execution::TensorProto tensorToProto(const at::Tensor& tensor) {
     remote_execution::TensorProto proto;
     
-    proto.set_dtype(tensor.dtype().name());
+    // proto.set_dtype(tensor.dtype().name());
+	proto.set_dtype(std::string(tensor.dtype().name()));
     for (auto s : tensor.sizes()) {
         proto.add_shape(s);
     }
