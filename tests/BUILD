@@ -39,8 +39,8 @@ py_test(
 )
 
 py_test(
-    name = "test_simple_model",
-    srcs = ["test_simple_model.py"],
+    name = "test_simple_model_inference",
+    srcs = ["test_simple_model_inference.py"],
     deps = [
         "//:remote_cuda",
         requirement("pytest"),
