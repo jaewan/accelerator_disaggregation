@@ -134,6 +134,32 @@ void execute_op_test(const c10::OperatorHandle& op, c10::Stack* stack) {
 	}
 }
 
+// Helper to serialize tensor to TensorProto
+remote_execution::TensorProto tensorToProto(const at::Tensor& tensor) {
+    remote_execution::TensorProto proto;
+    
+    proto.set_dtype(tensor.dtype().name());
+    for (auto s : tensor.sizes()) {
+        proto.add_shape(s);
+    }
+
+    auto tensor_contig = tensor.contiguous();
+    proto.set_data(tensor_contig.data_ptr(), tensor_contig.nbytes());
+
+    return proto;
+}
+
+// Helper to deserialize TensorProto to at::Tensor
+at::Tensor protoToTensor(const remote_execution::TensorProto& proto) {
+    std::vector<int64_t> shape(proto.shape().begin(), proto.shape().end());
+    auto options = at::TensorOptions().dtype(at::ScalarType::Float);  // Add other types as needed
+    
+    at::Tensor tensor = at::empty(shape, options);
+    std::memcpy(tensor.data_ptr(), proto.data().data(), proto.data().size());
+
+    return tensor;
+}
+
 // Function to execute an operation on the remote server
 at::Tensor execute_op_remotely(const c10::OperatorHandle& op, c10::Stack* stack) {
 	std::string op_name = op.schema().name();
@@ -142,10 +168,48 @@ at::Tensor execute_op_remotely(const c10::OperatorHandle& op, c10::Stack* stack)
 
 	// 1. Extract tensors and other necessary arguments from the stack
 	//at::ArrayRef<at::Tensor> tensors = extract_tensors(*stack);
+	
+	/*
+	message OpRequest {
+		string op_name = 1;
+		string overload_name = 2;
+		repeated TensorProto arguments = 3;
+	}
+	*/
+	// Extract tensors from the stack
+    	remote_execution::OpRequest request;
+    	request.set_op_name(op_name);
+    	request.set_overload_name(overload_name);
+
+	for (const auto& ivalue : *stack) {
+       	    if (ivalue.isTensor()) {
+            	const at::Tensor& tensor = ivalue.toTensor();
+            	*request.add_arguments() = tensorToProto(tensor);
+            }
+    	}
+
 
 	// 2. Serialize and send the operation and arguments to the remote server
 	//at::Tensor result = rpc_client::execute_op(op_name.c_str(), overload_name.c_str(), tensors, *stack);
-	at::Tensor result;
+	// at::Tensor result;
+	
+	// Set up gRPC client and make the call
+    	auto channel = grpc::CreateChannel("remote_server_address:50051", grpc::InsecureChannelCredentials());
+    	std::unique_ptr<remote_execution::RemoteExecutionService::Stub> stub = remote_execution::RemoteExecutionService::NewStub(channel);
+
+    	grpc::ClientContext context;
+    	remote_execution::OpResponse response;
+
+    	grpc::Status status = stub->ExecuteOp(&context, request, &response);
+
+    	if (!status.ok()) {
+        	throw std::runtime_error("RPC failed: " + status.error_message());
+    	}
+
+    	// Deserialize result
+    	at::Tensor result_tensor = protoToTensor(response.result());
+
+    	return result_tensor;
 
 	// 3. Deserialize the result from the remote server
 	//update_stack_with_result(*stack, result);
@@ -155,7 +219,7 @@ at::Tensor execute_op_remotely(const c10::OperatorHandle& op, c10::Stack* stack)
 	// 3. Receive and deserialize results
 	// 4. Update stack with results
 
-	return result;
+	//return result;
 }
 
 // Function to execute operation locally
