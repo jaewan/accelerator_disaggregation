@@ -9,6 +9,18 @@ class TestRemoteCUDA(unittest.TestCase):
         cls.device_remote = remote_cuda.REMOTE_CUDA
         cls.device_cuda = "cuda" if torch.cuda.is_available() else "cpu"
     
+    def test_add(self):
+        a_cuda = torch.tensor([1.0, 2.0, 3.0], device=self.device_cuda)
+        b_cuda = torch.tensor([4.0, 5.0, 6.0], device=self.device_cuda)
+        
+        a_remote = torch.tensor([1.0, 2.0, 3.0], device=self.device_remote)
+        b_remote = torch.tensor([4.0, 5.0, 6.0], device=self.device_remote)
+        
+        c_cuda = a_cuda + b_cuda
+        c_remote = a_remote + b_remote
+        self.assertTrue(c_remote.device.type == self.device_remote.type, "Device type mismatch {} {}".format(c_remote.device.type, self.device_remote.type))
+        self.assertTrue(torch.equal(c_cuda, c_remote), "Addition mismatch")
+        
     def test_basic_operations(self):
         # Test tensor creation
         a_cuda = torch.tensor([1.0, 2.0, 3.0], device=self.device_cuda)
