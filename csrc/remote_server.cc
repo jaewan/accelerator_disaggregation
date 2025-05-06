@@ -3,12 +3,12 @@
 #include <string>
 
 #include <grpcpp/grpcpp.h>
-#include "remote_execution.grpc.pb.h"
+#include "proto/remote_execution.grpc.pb.h"
+#include "proto/remote_execution.pb.h"
 
 #include <ATen/ATen.h>
+#include <ATen/core/dispatch/Dispatcher.h>
 #include <c10/core/DispatchKeySet.h>
-#include <c10/core/OperatorName.h>
-#include <c10/core/Dispatcher.h>
 #include <c10/util/Optional.h>
 
 using grpc::Server;
@@ -20,7 +20,6 @@ using remote_execution::OpRequest;
 using remote_execution::OpResponse;
 using remote_execution::RemoteExecutionService;
 using remote_execution::TensorProto;
-
 // Helper to deserialize TensorProto to at::Tensor
 at::Tensor protoToTensor(const TensorProto& proto) {
     std::vector<int64_t> shape(proto.shape().begin(), proto.shape().end());
@@ -35,7 +34,8 @@ at::Tensor protoToTensor(const TensorProto& proto) {
 // Helper to serialize at::Tensor to TensorProto
 TensorProto tensorToProto(const at::Tensor& tensor) {
     TensorProto proto;
-    proto.set_dtype(tensor.dtype().name());
+    proto.set_dtype(std::string(tensor.dtype().name()));
+    
     for (auto s : tensor.sizes()) {
         proto.add_shape(s);
     }
@@ -47,11 +47,13 @@ TensorProto tensorToProto(const at::Tensor& tensor) {
 }
 
 class RemoteExecutionServiceImpl final : public RemoteExecutionService::Service {
-    Status ExecuteOp(ServerContext* context, const OpRequest* request, OpResponse* response) override {
+    Status ExecuteOp(ServerContext* context,
+                     const OpRequest* request,
+                     OpResponse* response) override {
         std::cout << "[SERVER] Received op: " << request->op_name() << std::endl;
 
-        // Build stack
-        c10::Stack stack;
+        // Build JIT stack
+        torch::jit::Stack stack;
 
         // Parse arguments (only Tensor for now)
         for (const auto& tensor_proto : request->arguments()) {
@@ -59,25 +61,32 @@ class RemoteExecutionServiceImpl final : public RemoteExecutionService::Service 
             stack.push_back(tensor);
         }
 
-        // Lookup operator
-        c10::OperatorName op_name(request->op_name(), request->overload_name());
-        auto op = c10::Dispatcher::singleton().findSchemaOrThrow(op_name);
+        // Lookup operator schema
+        auto op = c10::Dispatcher::singleton()
+                      .findSchemaOrThrow(
+                          request->op_name().c_str(),
+                          request->overload_name().c_str()
+                      );
 
-        // Dispatch op
+        // Dispatch on CPU
         try {
-            op.redispatchBoxed(c10::DispatchKeySet(c10::DispatchKey::CPU), &stack);
+            op.redispatchBoxed(
+                c10::DispatchKeySet(c10::DispatchKey::CPU),
+                &stack
+            );
         } catch (const std::exception& e) {
-            return Status(grpc::StatusCode::UNKNOWN, std::string("Op execution failed: ") + e.what());
+            return Status(grpc::StatusCode::UNKNOWN,
+                          std::string("Op execution failed: ") + e.what());
         }
 
-        // Get result
+        // Pop result
         auto result_ivalue = stack.back();
         stack.pop_back();
 
         if (!result_ivalue.isTensor()) {
-            return Status(grpc::StatusCode::UNKNOWN, "Non-tensor results are not supported yet");
+            return Status(grpc::StatusCode::UNKNOWN,
+                          "Non-tensor results are not supported yet");
         }
-
         at::Tensor result_tensor = result_ivalue.toTensor();
         *response->mutable_result() = tensorToProto(result_tensor);
 
@@ -90,12 +99,12 @@ void RunServer() {
     RemoteExecutionServiceImpl service;
 
     grpc::ServerBuilder builder;
-    builder.AddListeningPort(server_address, grpc::InsecureServerCredentials());
+    builder.AddListeningPort(server_address,
+                             grpc::InsecureServerCredentials());
     builder.RegisterService(&service);
 
     std::unique_ptr<Server> server(builder.BuildAndStart());
     std::cout << "[SERVER] Listening on " << server_address << std::endl;
-
     server->Wait();
 }
 
@@ -103,4 +112,3 @@ int main(int argc, char** argv) {
     RunServer();
     return 0;
 }
-

@@ -99,6 +99,30 @@ cc_library(
     ],
 )
 
+cc_binary(
+    name = "remote_execution_server",
+    srcs = ["csrc/remote_server.cc"],
+    copts = [
+        "-std=c++17",
+        "-fPIC",
+        "-D_GLIBCXX_USE_CXX11_ABI=0",  # Match PyTorch ABI
+    ],
+    deps = [
+        ":remote_execution_grpc_cc",
+        ":remote_execution_cc_proto",
+        "@rules_python//python/cc:current_py_cc_libs",
+        "@com_github_grpc_grpc//:grpc++",
+        "@libtorch",
+        "@spdlog//:spdlog",
+    ],
+    includes = [
+        "@libtorch//:include",
+        "@libtorch//:include/torch/csrc/api/include",
+    ],
+    features = ["cpp17"],
+)
+
+
 # Python extension module
 pybind_extension(
     name = "remote_cuda_ext",
