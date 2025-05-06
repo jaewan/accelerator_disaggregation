@@ -6,6 +6,7 @@
 #include "proto/remote_execution.grpc.pb.h"
 #include "proto/remote_execution.pb.h"
 
+#include <torch/script.h>
 #include <ATen/ATen.h>
 #include <ATen/core/dispatch/Dispatcher.h>
 #include <c10/core/DispatchKeySet.h>
@@ -15,34 +16,44 @@ using grpc::Server;
 using grpc::ServerBuilder;
 using grpc::ServerContext;
 using grpc::Status;
-
 using remote_execution::OpRequest;
 using remote_execution::OpResponse;
 using remote_execution::RemoteExecutionService;
 using remote_execution::TensorProto;
-// Helper to deserialize TensorProto to at::Tensor
+
+// Deserialize
 at::Tensor protoToTensor(const TensorProto& proto) {
     std::vector<int64_t> shape(proto.shape().begin(), proto.shape().end());
-    at::ScalarType dtype = at::kFloat; // TODO: handle more dtypes
-    
-    at::Tensor tensor = at::empty(shape, at::TensorOptions().dtype(dtype));
-    std::memcpy(tensor.data_ptr(), proto.data().data(), proto.data().size());
+    size_t expected_bytes = 1;
+    for (auto s : shape) expected_bytes *= s;
+    expected_bytes *= sizeof(float);  // assuming float
 
+    if (proto.data().size() != expected_bytes) {
+        std::cerr << "[SERVER][WARN] Data size mismatch: "
+                  << proto.data().size() << " vs expected " << expected_bytes
+                  << std::endl;
+    }
+    at::Tensor tensor = at::empty(shape, at::TensorOptions().dtype(at::kFloat));
+    std::memcpy(tensor.data_ptr(), proto.data().data(),
+                std::min(proto.data().size(), expected_bytes));
     return tensor;
 }
 
-// Helper to serialize at::Tensor to TensorProto
+// Serialize
 TensorProto tensorToProto(const at::Tensor& tensor) {
     TensorProto proto;
-    proto.set_dtype(std::string(tensor.dtype().name()));
-    
+    auto dtype_name = std::string(tensor.dtype().name());
+    proto.set_dtype(dtype_name);
+    std::cout << "[SERVER] Serializing tensor (dtype=" << dtype_name
+              << ", sizes=";
+    for (auto s : tensor.sizes()) std::cout << s << ",";
+    std::cout << ")" << std::endl;
+
     for (auto s : tensor.sizes()) {
         proto.add_shape(s);
     }
-
-    auto tensor_contig = tensor.contiguous();
-    proto.set_data(tensor_contig.data_ptr(), tensor_contig.nbytes());
-
+    auto contig = tensor.contiguous();
+    proto.set_data(contig.data_ptr(), contig.nbytes());
     return proto;
 }
 
@@ -50,65 +61,73 @@ class RemoteExecutionServiceImpl final : public RemoteExecutionService::Service 
     Status ExecuteOp(ServerContext* context,
                      const OpRequest* request,
                      OpResponse* response) override {
-        std::cout << "[SERVER] Received op: " << request->op_name() << std::endl;
+        std::cout << "[SERVER] ==> ExecuteOp start" << std::endl;
+        std::cout << "[SERVER] Received op_name=" << request->op_name()
+                  << ", overload=" << request->overload_name()
+                  << ", #args=" << request->arguments_size()
+                  << std::endl;
 
-        // Build JIT stack
+        // Build stack
         torch::jit::Stack stack;
-
-        // Parse arguments (only Tensor for now)
-        for (const auto& tensor_proto : request->arguments()) {
-            at::Tensor tensor = protoToTensor(tensor_proto);
-            stack.push_back(tensor);
+        for (int i = 0; i < request->arguments_size(); ++i) {
+            auto& arg_proto = request->arguments(i);
+            at::Tensor t = protoToTensor(arg_proto);
+            std::cout << "[SERVER]  - Arg " << i << " tensor sizes="
+                      << t.sizes() << std::endl;
+            stack.push_back(t);
         }
 
-        // Lookup operator schema
+        // Lookup operator
+        const char* name_c    = request->op_name().c_str();
+        const char* overload_c= request->overload_name().c_str();
+        std::cout << "[SERVER] Looking up schema " << name_c
+                  << "/" << overload_c << std::endl;
         auto op = c10::Dispatcher::singleton()
-                      .findSchemaOrThrow(
-                          request->op_name().c_str(),
-                          request->overload_name().c_str()
-                      );
+                      .findSchemaOrThrow(name_c, overload_c);
 
-        // Dispatch on CPU
+        // Dispatch
         try {
-            op.redispatchBoxed(
-                c10::DispatchKeySet(c10::DispatchKey::CPU),
-                &stack
-            );
+            std::cout << "[SERVER] Dispatching on CPU" << std::endl;
+            op.redispatchBoxed(c10::DispatchKeySet(c10::DispatchKey::CPU),
+                               &stack);
         } catch (const std::exception& e) {
+            std::cerr << "[SERVER][ERROR] Dispatch failed: "
+                      << e.what() << std::endl;
             return Status(grpc::StatusCode::UNKNOWN,
-                          std::string("Op execution failed: ") + e.what());
+                          std::string("Dispatch error: ") + e.what());
         }
 
-        // Pop result
+        // Get result
         auto result_ivalue = stack.back();
-        stack.pop_back();
-
         if (!result_ivalue.isTensor()) {
+            std::cerr << "[SERVER][ERROR] Result is not a tensor"
+                      << std::endl;
             return Status(grpc::StatusCode::UNKNOWN,
-                          "Non-tensor results are not supported yet");
+                          "Result not tensor");
         }
-        at::Tensor result_tensor = result_ivalue.toTensor();
-        *response->mutable_result() = tensorToProto(result_tensor);
+        at::Tensor result = result_ivalue.toTensor();
+        std::cout << "[SERVER] Execution complete, result sizes="
+                  << result.sizes() << std::endl;
 
+        *response->mutable_result() = tensorToProto(result);
+        std::cout << "[SERVER] <== ExecuteOp done" << std::endl;
         return Status::OK;
     }
 };
 
 void RunServer() {
-    std::string server_address("0.0.0.0:50051");
+    std::string addr("0.0.0.0:50051");
     RemoteExecutionServiceImpl service;
-
-    grpc::ServerBuilder builder;
-    builder.AddListeningPort(server_address,
-                             grpc::InsecureServerCredentials());
+    ServerBuilder builder;
+    builder.AddListeningPort(addr, grpc::InsecureServerCredentials());
     builder.RegisterService(&service);
-
     std::unique_ptr<Server> server(builder.BuildAndStart());
-    std::cout << "[SERVER] Listening on " << server_address << std::endl;
+    std::cout << "[SERVER] Listening on " << addr << std::endl;
     server->Wait();
 }
 
 int main(int argc, char** argv) {
+    std::cout << "[SERVER] Starting up..." << std::endl;
     RunServer();
     return 0;
 }

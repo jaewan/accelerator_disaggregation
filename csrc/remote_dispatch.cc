@@ -54,8 +54,8 @@ const absl::flat_hash_set<std::string> kLocalOps = {
 		 "aten::println",   // CPU-specific: Printing a new line
 		 "aten::set_printoptions", // CPU-specific: set printing options
 
-		 "aten::empty.memory_format", //CPU-specific, allocate tensor based on cpu
 		 */
+		 "aten::empty", // CPU-specific, allocate tensor based on cpu
 
 	// Add more operations as needed
 };
@@ -262,7 +262,7 @@ at::Tensor execute_op_remotely(const c10::OperatorHandle& op, c10::Stack* stack)
 	// at::Tensor result;
 	
 	// Set up gRPC client and make the call
-    	auto channel = grpc::CreateChannel("remote_server_address:50051", grpc::InsecureChannelCredentials());
+    	auto channel = grpc::CreateChannel("localhost:50051", grpc::InsecureChannelCredentials());
     	std::unique_ptr<remote_execution::RemoteExecutionService::Stub> stub = remote_execution::RemoteExecutionService::NewStub(channel);
 
     	grpc::ClientContext context;
@@ -301,7 +301,8 @@ void execute_op_locally(const c10::OperatorHandle& op, c10::Stack* stack) {
 	//op.redispatchBoxed(c10::DispatchKeySet(at::DispatchKey::CPU), stack);
 
 	// Slower but more stable and suggested version
-	at::native::cpu_fallback(op, stack);
+	// at::native::cpu_fallback(op, stack);
+	execute_op_test(op, stack);
 }
 
 // Define a boxed fallback function outside the registerFallback call
@@ -314,14 +315,14 @@ void remote_cuda_fallback(const c10::OperatorHandle& op, c10::Stack* stack) {
 		execute_op_locally(op, stack);
 	} else {
 		// Move stack to remote_cuda device
-		for (c10::IValue& ivalue : *stack) {
-			if (ivalue.isTensor()) {
-				at::Tensor tensor = ivalue.toTensor();
-				if (tensor.device().type() != c10::DeviceType::PrivateUse1) {
-					ivalue = tensor.to(c10::Device(c10::DeviceType::PrivateUse1, 0));
-				}
-			}
-		}
+		// for (c10::IValue& ivalue : *stack) {
+		// 	if (ivalue.isTensor()) {
+		// 		at::Tensor tensor = ivalue.toTensor();
+		// 		if (tensor.device().type() != c10::DeviceType::PrivateUse1) {
+		// 			ivalue = tensor.to(c10::Device(c10::DeviceType::PrivateUse1, 0));
+		// 		}
+		// 	}
+		// }
 		at::Tensor result = execute_op_remotely(op, stack);
 		stack->clear();
 		stack->push_back(result);
@@ -540,6 +541,6 @@ TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
 }
 
 TORCH_LIBRARY_IMPL(_, PrivateUse1, m) {
-	//m.fallback(torch::CppFunction::makeFromBoxedFunction<&remote_cuda::remote_cuda_fallback>());
-	m.fallback(torch::CppFunction::makeFromBoxedFunction<&remote_cuda::execute_op_test>());
+	m.fallback(torch::CppFunction::makeFromBoxedFunction<&remote_cuda::remote_cuda_fallback>());
+	// m.fallback(torch::CppFunction::makeFromBoxedFunction<&remote_cuda::execute_op_test>());
 }
