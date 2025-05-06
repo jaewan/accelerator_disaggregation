@@ -2,13 +2,6 @@ import torch
 import remote_cuda
 import unittest
 
-import os, subprocess, time, atexit
-
-SERVER = os.environ["SERVER_BIN"]
-proc = subprocess.Popen([SERVER])
-time.sleep(2)
-atexit.register(proc.terminate)
-
 class TestRemoteCUDA(unittest.TestCase):
     
     @classmethod
