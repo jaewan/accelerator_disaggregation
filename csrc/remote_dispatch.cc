@@ -378,13 +378,22 @@ void remote_cuda_fallback(const c10::OperatorHandle& op, c10::Stack* stack) {
 
     c10::IValue result = execute_op_remotely(op_name, overload_name, stack);
 
-    if (result.isTensor()) {
-        at::_copy_from_and_resize(result.toTensor(),
-                                  out_placeholder.toTensor());
-        stack->clear();
+	stack->clear();
+
+    if (is_out && result.isTensor()) {
+        at::_copy_from_and_resize(
+            result.toTensor(),
+            out_placeholder.toTensor()
+        );
         stack->push_back(out_placeholder);
-    } else {
-        stack->clear();
+    } 
+	else if (result.isTensor()) {
+        at::Tensor cpu_res = result.toTensor();
+        at::Tensor remote_res = change_tensor_device_to_remote_cuda(cpu_res);
+        stack->push_back(remote_res);
+    }
+	// Scalar, List
+	else {
         stack->push_back(result);
     }
 }

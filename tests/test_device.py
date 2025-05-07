@@ -41,15 +41,15 @@ class TestRemoteCUDA(unittest.TestCase):
         self.assertTrue(torch.equal(d_cuda, d_remote), "Multiplication mismatch")
         
         # Test more complex operations
-        # e_cuda = torch.matmul(a_cuda, b_cuda)
-        # e_remote = torch.matmul(a_remote, b_remote) # Should intercept matmul
-        # self.assertTrue(e_remote.device.type == self.device_remote.type, "Device type mismatch {} {}".format(e_remote.device.type, self.device_remote.type))
-        # self.assertTrue(torch.equal(e_cuda, e_remote), "Matmul mismatch")
+        e_cuda = torch.matmul(a_cuda, b_cuda)
+        e_remote = torch.matmul(a_remote, b_remote) # Should intercept matmul
+        self.assertTrue(e_remote.device.type == self.device_remote.type, "Device type mismatch {} {}".format(e_remote.device.type, self.device_remote.type))
+        self.assertTrue(torch.equal(e_cuda, e_remote), "Matmul mismatch")
         
-        # f_cuda = torch.nn.functional.relu(a_cuda)
-        # f_remote = torch.nn.functional.relu(a_remote) # Should intercept relu
-        # self.assertTrue(f_remote.device.type == self.device_remote.type, "Device type mismatch {} {}".format(f_remote.device.type, self.device_remote.type))
-        # self.assertTrue(torch.equal(f_cuda, f_remote), "ReLU mismatch")
+        f_cuda = torch.nn.functional.relu(a_cuda)
+        f_remote = torch.nn.functional.relu(a_remote) # Should intercept relu
+        self.assertTrue(f_remote.device.type == self.device_remote.type, "Device type mismatch {} {}".format(f_remote.device.type, self.device_remote.type))
+        self.assertTrue(torch.equal(f_cuda, f_remote), "ReLU mismatch")
     
     def test_tensor_create(self):
         # Instead of creating tensors directly on the device:
