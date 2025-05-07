@@ -226,6 +226,16 @@ remote_execution::ScalarProto scalarToProto(const c10::IValue& iv) {
     return p;
 }
 
+c10::IValue scalarFromProto(const remote_execution::ScalarProto& p) {
+    switch (p.value_case()) {
+      case remote_execution::ScalarProto::kI: return (int64_t)p.i();
+      case remote_execution::ScalarProto::kF: return (double)p.f();
+      case remote_execution::ScalarProto::kB: return (bool)p.b();
+      case remote_execution::ScalarProto::kS: return p.s();
+      default: throw std::runtime_error("Unknown scalar");
+    }
+}
+
 remote_execution::ListProto listToProto(const c10::IValue& iv) {
     if (!iv.isList()) {
         throw std::runtime_error("Expected List, got non-list IValue");
@@ -252,89 +262,78 @@ at::Tensor protoToTensor(const remote_execution::TensorProto& proto) {
     return tensor;
 }
 
+c10::IValue listFromProto(const remote_execution::ListProto& lp) {
+    c10::impl::GenericList gl(c10::AnyType::get());
+    for (const auto& arg : lp.values()) {
+        if (arg.has_tensor())  gl.push_back(protoToTensor(arg.tensor()));
+        else if (arg.has_scalar()) gl.push_back(scalarFromProto(arg.scalar()));
+        else if (arg.has_list())   gl.push_back(listFromProto(arg.list()));
+    }
+    return gl;
+}
 
 // Function to execute an operation on the remote server
-at::Tensor execute_op_remotely(const c10::OperatorHandle& op, c10::Stack* stack) {
-	std::string op_name = op.schema().name();
-	std::string overload_name = op.schema().overload_name();
-	SPDLOG_INFO("[DEBUG] Executing operation from remote {}",op_name);
+c10::IValue execute_op_remotely(
+    const std::string& op_name,
+    const std::string& overload_name,
+    c10::Stack* stack) 
+{
+    SPDLOG_INFO("[DEBUG] Executing remote op {}/{}",
+                op_name, overload_name);
 
-	// 1. Extract tensors and other necessary arguments from the stack
-	//at::ArrayRef<at::Tensor> tensors = extract_tensors(*stack);
-	
-	/*
-	message OpRequest {
-		string op_name = 1;
-		string overload_name = 2;
-		repeated TensorProto arguments = 3;
-	}
-	*/
-	// Extract tensors from the stack
-    	remote_execution::OpRequest request;
-    	request.set_op_name(op_name);
-    	request.set_overload_name(overload_name);
+    remote_execution::OpRequest request;
+    request.set_op_name(op_name);
+    request.set_overload_name(overload_name);
+    for (size_t i = 0; i < stack->size(); ++i) {
+        const auto& iv = (*stack)[i];
+        if (iv.isTensor()) {
+            SPDLOG_DEBUG("[CLIENT] Arg {} type=Tensor", i);
+            auto* arg = request.add_arguments();
+            *arg->mutable_tensor() = tensorToProto(iv.toTensor());
+        }
+        else if (iv.isScalar()) {
+            SPDLOG_DEBUG("[CLIENT] Arg {} type=Scalar", i);
+            auto* arg = request.add_arguments();
+            *arg->mutable_scalar() = scalarToProto(iv);
+        }
+        else if (iv.isList()) {
+            SPDLOG_DEBUG("[CLIENT] Arg {} type=List", i);
+            auto* arg = request.add_arguments();
+            *arg->mutable_list() = listToProto(iv);
+        }
+        else {
+            SPDLOG_DEBUG("[CLIENT] Arg {} type=Unknown", i);
+        }
+    }
 
-		for (size_t i = 0; i < stack->size(); ++i) {
-			const auto& ivalue = (*stack)[i];
-			if (ivalue.isTensor()) {
-				SPDLOG_DEBUG("[CLIENT] Arg {} type=Tensor", i);
-				const at::Tensor& tensor = ivalue.toTensor();
-				auto* arg = request.add_arguments();
-				*arg->mutable_tensor() = tensorToProto(tensor);
-			}
-			else if (ivalue.isScalar()) {
-				SPDLOG_DEBUG("[CLIENT] Arg {} type=Scalar", i);
-				auto* arg = request.add_arguments();
-				*arg->mutable_scalar() = scalarToProto(ivalue);
-			}
-			else if (ivalue.isList()) {
-				SPDLOG_DEBUG("[CLIENT] Arg {} type=List", i);
-				auto* arg = request.add_arguments();
-				*arg->mutable_list() = listToProto(ivalue);
-			}
-			else {
-				SPDLOG_DEBUG("[CLIENT] Arg {} type=Unknown", i);
-			}
-		}
+    auto channel = grpc::CreateChannel(
+        "localhost:50051", grpc::InsecureChannelCredentials());
+    auto stub = remote_execution::RemoteExecutionService::NewStub(channel);
+    grpc::ClientContext ctx;
+    remote_execution::OpResponse resp;
+    auto status = stub->ExecuteOp(&ctx, request, &resp);
+    if (!status.ok()) {
+        SPDLOG_ERROR("[CLIENT] RPC failed: {}", status.error_message());
+        throw std::runtime_error("RPC failed");
+    }
 
-		
-
-
-	// 2. Serialize and send the operation and arguments to the remote server
-	//at::Tensor result = rpc_client::execute_op(op_name.c_str(), overload_name.c_str(), tensors, *stack);
-	// at::Tensor result;
-	
-	// Set up gRPC client and make the call
-    	auto channel = grpc::CreateChannel("localhost:50051", grpc::InsecureChannelCredentials());
-    	std::unique_ptr<remote_execution::RemoteExecutionService::Stub> stub = remote_execution::RemoteExecutionService::NewStub(channel);
-
-    	grpc::ClientContext context;
-    	remote_execution::OpResponse response;
-
-    	grpc::Status status = stub->ExecuteOp(&context, request, &response);
-
-    	if (!status.ok()) {
-        	throw std::runtime_error("RPC failed: " + status.error_message());
-    	}
-
-    	// Deserialize result
-		const auto& result_arg = response.result();
-		if (!result_arg.has_tensor()) {
-			throw std::runtime_error("RPC returned non-tensor Arg");
-		}
-		at::Tensor result_tensor = protoToTensor(result_arg.tensor());
-
-    	return result_tensor;
-
-	// 3. Deserialize the result from the remote server
-	//update_stack_with_result(*stack, result);
-	// TODO: Implement remote execution logic here
-	// 1. Serialize operation and arguments
-	// 2. Send to remote server
-	// 3. Receive and deserialize results
-	// 4. Update stack with results
-
-	//return result;
+    const auto& result_arg = resp.result();
+    if (result_arg.has_tensor()) {
+        SPDLOG_INFO("[CLIENT] Received result type=Tensor");
+        return protoToTensor(result_arg.tensor());
+    }
+    else if (result_arg.has_scalar()) {
+        SPDLOG_INFO("[CLIENT] Received result type=Scalar");
+        return scalarFromProto(result_arg.scalar());
+    }
+    else if (result_arg.has_list()) {
+        SPDLOG_INFO("[CLIENT] Received result type=List");
+        return listFromProto(result_arg.list());
+    }
+    else {
+        SPDLOG_ERROR("[CLIENT] RPC returned empty Arg");
+        throw std::runtime_error("Empty Arg in response");
+    }
 }
 
 // Function to execute operation locally
@@ -354,26 +353,40 @@ void execute_op_locally(const c10::OperatorHandle& op, c10::Stack* stack) {
 
 // Define a boxed fallback function outside the registerFallback call
 void remote_cuda_fallback(const c10::OperatorHandle& op, c10::Stack* stack) {
-	const std::string& op_name = op.schema().name();
-	SPDLOG_INFO("[DEBUG] remote_cuda_fallback called : {}", op_name);
+    const auto& schema = op.schema();
+    const std::string& op_name       = schema.name();            // e.g. "aten::add"
+    std::string        overload_name = schema.overload_name();   // e.g. "out" or "Tensor"
 
-	// Check if the operation should be executed locally
-	if (kLocalOps.count(op_name)) {
-		execute_op_locally(op, stack);
-	} else {
-		// Move stack to remote_cuda device
-		// for (c10::IValue& ivalue : *stack) {
-		// 	if (ivalue.isTensor()) {
-		// 		at::Tensor tensor = ivalue.toTensor();
-		// 		if (tensor.device().type() != c10::DeviceType::PrivateUse1) {
-		// 			ivalue = tensor.to(c10::Device(c10::DeviceType::PrivateUse1, 0));
-		// 		}
-		// 	}
-		// }
-		at::Tensor result = execute_op_remotely(op, stack);
-		stack->clear();
-		stack->push_back(result);
-	}
+    SPDLOG_INFO("[DEBUG] remote_cuda_fallback called: {}.{}", op_name, overload_name);
+
+    if (kLocalOps.count(op_name)) {
+        execute_op_locally(op, stack);
+        return;
+    }
+
+    bool is_out = (overload_name == "out");
+    if (is_out) {
+        SPDLOG_DEBUG("[CLIENT] Detected out-variant, switching overload to Tensor");
+        overload_name = "Tensor";
+    }
+
+    c10::IValue out_placeholder;
+    if (is_out) {
+        out_placeholder = stack->back();
+        stack->pop_back();
+    }
+
+    c10::IValue result = execute_op_remotely(op_name, overload_name, stack);
+
+    if (result.isTensor()) {
+        at::_copy_from_and_resize(result.toTensor(),
+                                  out_placeholder.toTensor());
+        stack->clear();
+        stack->push_back(out_placeholder);
+    } else {
+        stack->clear();
+        stack->push_back(result);
+    }
 }
 
 void register_dispatch_keys() {
