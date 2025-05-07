@@ -1,24 +1,49 @@
 syntax = "proto3";
-
 package remote_execution;
 
 service RemoteExecutionService {
   rpc ExecuteOp(OpRequest) returns (OpResponse);
 }
 
+// A tensor type
 message TensorProto {
-  bytes data = 1;
+  bytes data    = 1;
   repeated int64 shape = 2;
-  string dtype = 3;
+  string dtype  = 3;
 }
 
+// A scalar type
+message ScalarProto {
+  oneof value {
+    int64   i = 1;
+    double  f = 2;
+    bool    b = 3;
+    string  s = 4;
+  }
+}
+
+// Recursive list of values
+message ListProto {
+  repeated Arg values = 1;
+}
+
+// A single argument can be a tensor, scalar, or list
+message Arg {
+  oneof payload {
+    TensorProto tensor = 1;
+    ScalarProto scalar = 2;
+    ListProto   list   = 3;
+  }
+}
+
+// Request: op name + list of arguments
 message OpRequest {
-  string op_name = 1;
+  string op_name       = 1;
   string overload_name = 2;
-  repeated TensorProto arguments = 3;
+  repeated Arg arguments = 3;
 }
 
+// Response: single Arg result (could be tensor/list/scalar)
 message OpResponse {
-  TensorProto result = 1;
+  Arg result = 1;
 }
-

@@ -216,6 +216,31 @@ remote_execution::TensorProto tensorToProto(const at::Tensor& tensor) {
     return proto;
 }
 
+remote_execution::ScalarProto scalarToProto(const c10::IValue& iv) {
+    remote_execution::ScalarProto p;
+    if (iv.isInt())        p.set_i(iv.toInt());
+    else if (iv.isDouble()) p.set_f(iv.toDouble());
+    else if (iv.isBool())   p.set_b(iv.toBool());
+    else if (iv.isString()) p.set_s(iv.toStringRef());
+    else throw std::runtime_error("Unsupported scalar type");
+    return p;
+}
+
+remote_execution::ListProto listToProto(const c10::IValue& iv) {
+    if (!iv.isList()) {
+        throw std::runtime_error("Expected List, got non-list IValue");
+    }
+    auto elems = iv.toListRef();
+    remote_execution::ListProto p;
+    for (const auto& elem : elems) {
+        remote_execution::Arg* a = p.add_values();
+        if (elem.isTensor())     *a->mutable_tensor() = tensorToProto(elem.toTensor());
+        else if (elem.isScalar()) *a->mutable_scalar() = scalarToProto(elem);
+        else if (elem.isList())   *a->mutable_list()   = listToProto(elem);
+    }
+    return p;
+}
+
 // Helper to deserialize TensorProto to at::Tensor
 at::Tensor protoToTensor(const remote_execution::TensorProto& proto) {
     std::vector<int64_t> shape(proto.shape().begin(), proto.shape().end());
@@ -249,12 +274,30 @@ at::Tensor execute_op_remotely(const c10::OperatorHandle& op, c10::Stack* stack)
     	request.set_op_name(op_name);
     	request.set_overload_name(overload_name);
 
-	for (const auto& ivalue : *stack) {
-       	    if (ivalue.isTensor()) {
-            	const at::Tensor& tensor = ivalue.toTensor();
-            	*request.add_arguments() = tensorToProto(tensor);
-            }
-    	}
+		for (size_t i = 0; i < stack->size(); ++i) {
+			const auto& ivalue = (*stack)[i];
+			if (ivalue.isTensor()) {
+				SPDLOG_DEBUG("[CLIENT] Arg {} type=Tensor", i);
+				const at::Tensor& tensor = ivalue.toTensor();
+				auto* arg = request.add_arguments();
+				*arg->mutable_tensor() = tensorToProto(tensor);
+			}
+			else if (ivalue.isScalar()) {
+				SPDLOG_DEBUG("[CLIENT] Arg {} type=Scalar", i);
+				auto* arg = request.add_arguments();
+				*arg->mutable_scalar() = scalarToProto(ivalue);
+			}
+			else if (ivalue.isList()) {
+				SPDLOG_DEBUG("[CLIENT] Arg {} type=List", i);
+				auto* arg = request.add_arguments();
+				*arg->mutable_list() = listToProto(ivalue);
+			}
+			else {
+				SPDLOG_DEBUG("[CLIENT] Arg {} type=Unknown", i);
+			}
+		}
+
+		
 
 
 	// 2. Serialize and send the operation and arguments to the remote server
@@ -275,7 +318,11 @@ at::Tensor execute_op_remotely(const c10::OperatorHandle& op, c10::Stack* stack)
     	}
 
     	// Deserialize result
-    	at::Tensor result_tensor = protoToTensor(response.result());
+		const auto& result_arg = response.result();
+		if (!result_arg.has_tensor()) {
+			throw std::runtime_error("RPC returned non-tensor Arg");
+		}
+		at::Tensor result_tensor = protoToTensor(result_arg.tensor());
 
     	return result_tensor;
 
