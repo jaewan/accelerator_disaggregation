@@ -63,6 +63,22 @@ const absl::flat_hash_set<std::string> kLocalOps = {
 	// Add more operations as needed
 };
 
+// Mapping common ops to their correct overload names based on PyTorch internals
+const std::unordered_map<std::string, std::string> kOpOverloadMap = {
+    {"aten::add", "Tensor"},          // Use "Tensor" for add
+    {"aten::sub", "Tensor"},          // Use "Tensor" for sub
+    {"aten::mul", "Tensor"},          // Use "Tensor" for mul
+    {"aten::div", "Tensor"},          // Use "Tensor" for div
+    {"aten::matmul", ""},             // Use "" (empty) for matmul
+    {"aten::mm", ""},                 // Use "" (empty) for mm
+    {"aten::cat", ""},                // Use "" (empty) for cat
+    {"aten::relu", ""},               // Use "" (empty) for relu
+    {"aten::sigmoid", ""},            // Use "" (empty) for sigmoid
+    {"aten::softmax", "int"},         // Use "int" for softmax
+    {"aten::conv2d", ""},             // Use "" (empty) for conv2d
+    {"aten::max_pool2d", ""},         // Use "" (empty) for max_pool2d
+};
+
 at::Tensor change_tensor_device_to_remote_cuda(const at::Tensor &cpu_result){
 	size_t tensor_size = cpu_result.numel() * cpu_result.element_size();
 	void* remote_ptr = remote_allocate(tensor_size);
@@ -281,6 +297,7 @@ c10::IValue execute_op_remotely(
     const std::string& overload_name,
     c10::Stack* stack) 
 {
+    // Log the operation request
     SPDLOG_INFO("[DEBUG] Executing remote op {}/{}",
                 op_name, overload_name);
 
@@ -428,27 +445,47 @@ void remote_cuda_fallback(const c10::OperatorHandle& op, c10::Stack* stack) {
     bool is_out = (overload_name == "out");
     
     // Map the overloaded operation correctly
-    // For many operations with 'out' variant, the correct schema uses no overload name or just "Tensor"
+    // First check the map for known overload names
     std::string remote_overload = overload_name;
-    if (is_out) {
+    
+    // For standard operations like add, mul, etc., use our predefined map
+    if (kOpOverloadMap.find(op_name) != kOpOverloadMap.end()) {
+        std::string mapped_overload = kOpOverloadMap.at(op_name);
+        SPDLOG_DEBUG("[CLIENT] Mapped operation {} to use overload '{}'", op_name, mapped_overload);
+        remote_overload = mapped_overload;
+    }
+    // Special handling for out variants
+    else if (is_out) {
         // Try to find the appropriate non-out schema
-        // Use empty string first (most common for base implementations)
-        remote_overload = "";
-        
-        // Check if the non-out schema exists
-        try {
-            c10::Dispatcher::singleton().findSchema({op_name, remote_overload});
-            SPDLOG_DEBUG("[CLIENT] Found matching schema without overload: {}", op_name);
-        } catch (const c10::Error& e) {
-            // Try with "Tensor" overload as fallback
+        // First check the map for the base op
+        if (kOpOverloadMap.find(op_name) != kOpOverloadMap.end()) {
+            remote_overload = kOpOverloadMap.at(op_name);
+            SPDLOG_DEBUG("[CLIENT] Mapped out operation {} to use overload '{}'", op_name, remote_overload);
+        } else {
+            // Otherwise use the general out-to-base mapping strategy
+            // Try empty string first (most common for base implementations)
             try {
-                remote_overload = "Tensor";
-                c10::Dispatcher::singleton().findSchema({op_name, remote_overload});
-                SPDLOG_DEBUG("[CLIENT] Found matching schema with Tensor overload: {}.{}", op_name, remote_overload);
-            } catch (const c10::Error& e2) {
-                // If both fail, keep original overload and let server handle it
-                remote_overload = overload_name;
-                SPDLOG_DEBUG("[CLIENT] Could not find matching schema, keeping original: {}.{}", op_name, remote_overload);
+                c10::Dispatcher::singleton().findSchema({op_name, ""});
+                remote_overload = "";
+                SPDLOG_DEBUG("[CLIENT] Found matching schema without overload: {}", op_name);
+            } catch (const c10::Error& e) {
+                // Try with "Tensor" overload as fallback
+                try {
+                    c10::Dispatcher::singleton().findSchema({op_name, "Tensor"});
+                    remote_overload = "Tensor";
+                    SPDLOG_DEBUG("[CLIENT] Found matching schema with Tensor overload: {}.{}", op_name, remote_overload);
+                } catch (const c10::Error& e2) {
+                    // If both fail, try some other common overloads
+                    try {
+                        c10::Dispatcher::singleton().findSchema({op_name, "int"});
+                        remote_overload = "int";
+                        SPDLOG_DEBUG("[CLIENT] Found matching schema with int overload: {}.{}", op_name, remote_overload);
+                    } catch (const c10::Error& e3) {
+                        // If all attempts fail, keep original overload
+                        remote_overload = overload_name;
+                        SPDLOG_DEBUG("[CLIENT] Could not find matching schema, keeping original: {}.{}", op_name, remote_overload);
+                    }
+                }
             }
         }
     }

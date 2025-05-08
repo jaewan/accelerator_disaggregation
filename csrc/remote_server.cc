@@ -178,6 +178,58 @@ Arg iValueToArg(const c10::IValue& iv) {
     return a;
 }
 
+// Helper function to find the correct operator schema
+c10::OperatorHandle findOperatorSchema(const std::string& op_name, const std::string& overload_name) {
+    // Try with the provided overload first
+    try {
+        return c10::Dispatcher::singleton().findSchemaOrThrow(op_name.c_str(), overload_name.c_str());
+    } catch (const c10::Error& e) {
+        // If that fails, try known alternate overloads
+        
+        // 1. Try with empty overload (many ops use this as default)
+        if (!overload_name.empty()) {
+            try {
+                return c10::Dispatcher::singleton().findSchemaOrThrow(op_name.c_str(), "");
+            } catch (const c10::Error&) {
+                // Continue to next attempt
+            }
+        }
+        
+        // 2. Try with "Tensor" overload (common for arithmetic ops)
+        if (overload_name != "Tensor") {
+            try {
+                return c10::Dispatcher::singleton().findSchemaOrThrow(op_name.c_str(), "Tensor");
+            } catch (const c10::Error&) {
+                // Continue to next attempt
+            }
+        }
+        
+        // 3. Special case handling for known ops
+        // For add/sub/mul/div without overload, try "Tensor"
+        if (overload_name.empty() && 
+            (op_name == "aten::add" || op_name == "aten::sub" || 
+             op_name == "aten::mul" || op_name == "aten::div")) {
+            try {
+                return c10::Dispatcher::singleton().findSchemaOrThrow(op_name.c_str(), "Tensor");
+            } catch (const c10::Error&) {
+                // Continue to next attempt
+            }
+        }
+        
+        // 4. Try with "int" overload (common for some ops like softmax)
+        if (overload_name != "int") {
+            try {
+                return c10::Dispatcher::singleton().findSchemaOrThrow(op_name.c_str(), "int");
+            } catch (const c10::Error&) {
+                // Continue to next attempt
+            }
+        }
+        
+        // Rethrow the original error if all attempts fail
+        throw;
+    }
+}
+
 // --- Service Implementation ---
 
 class RemoteExecutionServiceImpl final 
@@ -232,11 +284,9 @@ class RemoteExecutionServiceImpl final
         const std::string& overload_name = req->overload_name();
         std::cout << "[SERVER] Dispatching " << op_name << "/" << overload_name << std::endl;
         
-        // Try to find the schema with proper error handling
+        // Try to find the schema with our helper function
         try {
-            // First attempt with the provided overload name
-            auto op = c10::Dispatcher::singleton().findSchemaOrThrow(op_name.c_str(), overload_name.c_str());
-            
+            auto op = findOperatorSchema(op_name, overload_name);
             std::cout << "[SERVER] Found schema: " << op.schema() << std::endl;
             std::cout << "[SERVER] Argument count: " << stack.size() << std::endl;
             
@@ -248,33 +298,10 @@ class RemoteExecutionServiceImpl final
                 return Status(grpc::StatusCode::INTERNAL, "Dispatch error: " + std::string(e.what()));
             }
         } catch (const c10::Error& e) {
-            // If specific overload not found, try with empty overload
-            if (!overload_name.empty()) {
-                std::cout << "[SERVER] Schema not found with specified overload, trying with empty overload" << std::endl;
-                try {
-                    auto op = c10::Dispatcher::singleton().findSchemaOrThrow(op_name.c_str(), "");
-                    
-                    std::cout << "[SERVER] Found schema with empty overload: " << op.schema() << std::endl;
-                    std::cout << "[SERVER] Argument count: " << stack.size() << std::endl;
-                    
-                    try {
-                        at::native::cpu_fallback(op, &stack);
-                        std::cout << "[SERVER] Operation completed successfully" << std::endl;
-                    } catch (const std::exception& e) {
-                        std::cerr << "[SERVER][ERROR] Dispatch failed: " << e.what() << std::endl;
-                        return Status(grpc::StatusCode::INTERNAL, "Dispatch error: " + std::string(e.what()));
-                    }
-                } catch (const c10::Error& e2) {
-                    std::cerr << "[SERVER][ERROR] Schema not found with empty overload either: " 
-                            << e2.what() << std::endl;
-                    return Status(grpc::StatusCode::NOT_FOUND, 
-                                "Schema not found: " + std::string(e.what()));
-                }
-            } else {
-                std::cerr << "[SERVER][ERROR] Schema not found: " << e.what() << std::endl;
-                return Status(grpc::StatusCode::NOT_FOUND, 
-                            "Schema not found: " + std::string(e.what()));
-            }
+            std::cerr << "[SERVER][ERROR] Schema not found for op " << op_name << "/" << overload_name 
+                      << ": " << e.what() << std::endl;
+            return Status(grpc::StatusCode::NOT_FOUND, 
+                        "Schema not found: " + std::string(e.what()));
         }
 
         auto out_iv = stack.back();
