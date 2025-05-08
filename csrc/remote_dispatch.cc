@@ -55,12 +55,15 @@ const absl::flat_hash_set<std::string> kLocalOps = {
 		 "aten::set_printoptions", // CPU-specific: set printing options
 
 		 */
-		 "aten::empty", // CPU-specific, allocate tensor based on cpu
-
+		 "aten::empty", // Directly allocate tensor on local cpu currently
+		 "aten::normal_", // Need to support Generator if removed
+		 "aten::view",
+		 "aten::reshape",
+		 "aten::as_strided",
 	// Add more operations as needed
 };
 
-at::Tensor change_tensor_device_to_remote_cuda(at::Tensor &cpu_result){
+at::Tensor change_tensor_device_to_remote_cuda(const at::Tensor &cpu_result){
 	size_t tensor_size = cpu_result.numel() * cpu_result.element_size();
 	void* remote_ptr = remote_allocate(tensor_size);
 	memcpy(remote_ptr, cpu_result.data_ptr(), tensor_size);
@@ -284,12 +287,48 @@ c10::IValue execute_op_remotely(
     remote_execution::OpRequest request;
     request.set_op_name(op_name);
     request.set_overload_name(overload_name);
+    
+    // Helper function to detect if a List contains only Tensors
+    auto isTensorList = [](const c10::IValue& iv) -> bool {
+        if (!iv.isList()) return false;
+        
+        auto list_ref = iv.toListRef();
+        if (list_ref.empty()) return false;
+        
+        for (const auto& item : list_ref) {
+            if (!item.isTensor()) return false;
+        }
+        return true;
+    };
+    
     for (size_t i = 0; i < stack->size(); ++i) {
         const auto& iv = (*stack)[i];
+        
         if (iv.isTensor()) {
             SPDLOG_DEBUG("[CLIENT] Arg {} type=Tensor", i);
             auto* arg = request.add_arguments();
             *arg->mutable_tensor() = tensorToProto(iv.toTensor());
+        }
+        else if (iv.isTensorList()) {
+            SPDLOG_DEBUG("[CLIENT] Arg {} type=TensorList with {} tensors", i, iv.toTensorList().size());
+            
+            auto* arg = request.add_arguments();
+            auto tensor_list = iv.toTensorList().vec();
+            for (const auto& t : tensor_list) {
+                *arg->mutable_tensor_list()->add_tensors() = tensorToProto(t);
+            }
+            SPDLOG_DEBUG("[CLIENT] Added {} tensors to TensorList", tensor_list.size());
+        }
+        else if (isTensorList(iv)) {
+            // General handling for List[Tensor] - convert to TensorList for proper serialization
+            SPDLOG_DEBUG("[CLIENT] Arg {} type=List containing only Tensors, converting to TensorList", i);
+            
+            auto* arg = request.add_arguments();
+            auto list_ref = iv.toListRef();
+            for (const auto& item : list_ref) {
+                *arg->mutable_tensor_list()->add_tensors() = tensorToProto(item.toTensor());
+            }
+            SPDLOG_DEBUG("[CLIENT] Converted List to TensorList with {} tensors", list_ref.size());
         }
         else if (iv.isScalar()) {
             SPDLOG_DEBUG("[CLIENT] Arg {} type=Scalar", i);
@@ -301,26 +340,47 @@ c10::IValue execute_op_remotely(
             auto* arg = request.add_arguments();
             *arg->mutable_list() = listToProto(iv);
         }
+        else if (iv.isIntList()) {
+            SPDLOG_DEBUG("[CLIENT] Arg {} type=IntList", i);
+            auto dims = iv.toIntList();  // c10::IntArrayRef
+            auto* arg = request.add_arguments();
+            for (auto d : dims) {
+                auto* entry = arg->mutable_list()->add_values();
+                entry->mutable_scalar()->set_i(d);
+            }
+        }
         else {
-            SPDLOG_DEBUG("[CLIENT] Arg {} type=Unknown", i);
+            SPDLOG_DEBUG("[CLIENT] Arg {} type=Unknown: {}", i, iv.tagKind());
         }
     }
+
+    SPDLOG_DEBUG("[CLIENT] Created request with {} arguments", request.arguments_size());
 
     auto channel = grpc::CreateChannel(
         "localhost:50051", grpc::InsecureChannelCredentials());
     auto stub = remote_execution::RemoteExecutionService::NewStub(channel);
     grpc::ClientContext ctx;
     remote_execution::OpResponse resp;
+    
+    SPDLOG_DEBUG("[CLIENT] Sending RPC request");
     auto status = stub->ExecuteOp(&ctx, request, &resp);
     if (!status.ok()) {
-        SPDLOG_ERROR("[CLIENT] RPC failed: {}", status.error_message());
-        throw std::runtime_error("RPC failed");
+        SPDLOG_ERROR("[CLIENT] RPC failed: {} ({})", status.error_message(), status.error_code());
+        throw std::runtime_error("RPC failed: " + status.error_message());
     }
 
     const auto& result_arg = resp.result();
     if (result_arg.has_tensor()) {
         SPDLOG_INFO("[CLIENT] Received result type=Tensor");
         return protoToTensor(result_arg.tensor());
+    }
+    else if (result_arg.has_tensor_list()) {
+        SPDLOG_INFO("[CLIENT] Received result type=TensorList");
+        std::vector<at::Tensor> tensors;
+        for (const auto& tp : result_arg.tensor_list().tensors()) {
+            tensors.push_back(protoToTensor(tp));
+        }
+        return c10::IValue(c10::List<at::Tensor>(std::move(tensors)));
     }
     else if (result_arg.has_scalar()) {
         SPDLOG_INFO("[CLIENT] Received result type=Scalar");
@@ -354,8 +414,8 @@ void execute_op_locally(const c10::OperatorHandle& op, c10::Stack* stack) {
 // Define a boxed fallback function outside the registerFallback call
 void remote_cuda_fallback(const c10::OperatorHandle& op, c10::Stack* stack) {
     const auto& schema = op.schema();
-    const std::string& op_name       = schema.name();            // e.g. "aten::add"
-    std::string        overload_name = schema.overload_name();   // e.g. "out" or "Tensor"
+    const std::string& op_name = schema.name();            // e.g. "aten::add"
+    std::string overload_name = schema.overload_name();   // e.g. "out" or "Tensor"
 
     SPDLOG_INFO("[DEBUG] remote_cuda_fallback called: {}.{}", op_name, overload_name);
 
@@ -364,10 +424,33 @@ void remote_cuda_fallback(const c10::OperatorHandle& op, c10::Stack* stack) {
         return;
     }
 
+    // Store out variant
     bool is_out = (overload_name == "out");
+    
+    // Map the overloaded operation correctly
+    // For many operations with 'out' variant, the correct schema uses no overload name or just "Tensor"
+    std::string remote_overload = overload_name;
     if (is_out) {
-        SPDLOG_DEBUG("[CLIENT] Detected out-variant, switching overload to Tensor");
-        overload_name = "Tensor";
+        // Try to find the appropriate non-out schema
+        // Use empty string first (most common for base implementations)
+        remote_overload = "";
+        
+        // Check if the non-out schema exists
+        try {
+            c10::Dispatcher::singleton().findSchema({op_name, remote_overload});
+            SPDLOG_DEBUG("[CLIENT] Found matching schema without overload: {}", op_name);
+        } catch (const c10::Error& e) {
+            // Try with "Tensor" overload as fallback
+            try {
+                remote_overload = "Tensor";
+                c10::Dispatcher::singleton().findSchema({op_name, remote_overload});
+                SPDLOG_DEBUG("[CLIENT] Found matching schema with Tensor overload: {}.{}", op_name, remote_overload);
+            } catch (const c10::Error& e2) {
+                // If both fail, keep original overload and let server handle it
+                remote_overload = overload_name;
+                SPDLOG_DEBUG("[CLIENT] Could not find matching schema, keeping original: {}.{}", op_name, remote_overload);
+            }
+        }
     }
 
     c10::IValue out_placeholder;
@@ -376,9 +459,9 @@ void remote_cuda_fallback(const c10::OperatorHandle& op, c10::Stack* stack) {
         stack->pop_back();
     }
 
-    c10::IValue result = execute_op_remotely(op_name, overload_name, stack);
+    c10::IValue result = execute_op_remotely(op_name, remote_overload, stack);
 
-	stack->clear();
+    stack->clear();
 
     if (is_out && result.isTensor()) {
         at::_copy_from_and_resize(
@@ -387,13 +470,25 @@ void remote_cuda_fallback(const c10::OperatorHandle& op, c10::Stack* stack) {
         );
         stack->push_back(out_placeholder);
     } 
-	else if (result.isTensor()) {
+    else if (result.isTensor()) {
         at::Tensor cpu_res = result.toTensor();
         at::Tensor remote_res = change_tensor_device_to_remote_cuda(cpu_res);
         stack->push_back(remote_res);
     }
-	// Scalar, List
-	else {
+    // TensorList handling
+    else if (result.isTensorList()) {
+        auto tensor_list = result.toTensorList().vec();
+        std::vector<at::Tensor> remote_tensors;
+        remote_tensors.reserve(tensor_list.size());
+        
+        for (const auto& cpu_tensor : tensor_list) {
+            remote_tensors.push_back(change_tensor_device_to_remote_cuda(cpu_tensor));
+        }
+        
+        stack->push_back(c10::IValue(c10::List<at::Tensor>(std::move(remote_tensors))));
+    }
+    // Scalar, List, etc.
+    else {
         stack->push_back(result);
     }
 }

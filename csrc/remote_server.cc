@@ -108,20 +108,73 @@ ListProto listToProto(const c10::IValue& iv) {
     return p;
 }
 
+// Convert a tensor list into a TensorList proto
+void tensorListToProto(const std::vector<at::Tensor>& tensors, remote_execution::TensorListProto* proto) {
+    for (const auto& tensor : tensors) {
+        *proto->add_tensors() = tensorToProto(tensor);
+    }
+}
+
+// Convert TensorListProto to a vector of tensors
+std::vector<at::Tensor> protoToTensorList(const remote_execution::TensorListProto& proto) {
+    std::vector<at::Tensor> tensors;
+    tensors.reserve(proto.tensors_size());
+    for (const auto& tp : proto.tensors()) {
+        tensors.push_back(protoToTensor(tp));
+    }
+    return tensors;
+}
+
 // Any Arg ↔ IValue
 c10::IValue argToIValue(const Arg& a) {
     if (a.has_tensor()) return protoToTensor(a.tensor());
+    if (a.has_tensor_list()) {
+        std::vector<at::Tensor> vec = protoToTensorList(a.tensor_list());
+        return c10::IValue(c10::List<at::Tensor>(std::move(vec)));
+    }
     if (a.has_scalar()) return scalarFromProto(a.scalar());
-    if (a.has_list())   return listFromProto(a.list());
-    throw std::runtime_error("Empty Arg");
+    if (a.has_list()) {
+        const auto& lp = a.list();
+        bool all_ints = true;
+        for (const auto& entry : lp.values()) {
+            if (!entry.has_scalar() || entry.scalar().value_case() != ScalarProto::kI) {
+                all_ints = false;
+                break;
+            }
+        }
+        if (all_ints) {
+            std::vector<int64_t> dims;
+            dims.reserve(lp.values_size());
+            for (const auto& entry : lp.values()) {
+                dims.push_back(entry.scalar().i());
+            }
+            return c10::IValue(dims);
+        }
+        return listFromProto(lp);
+    }
+
+    throw std::runtime_error("Empty or Unsupportted Arg");
 }
 
 Arg iValueToArg(const c10::IValue& iv) {
     Arg a;
-    if (iv.isTensor())        *a.mutable_tensor() = tensorToProto(iv.toTensor());
-    else if (iv.isScalar())   *a.mutable_scalar() = scalarToProto(iv);
-    else if (iv.isList())     *a.mutable_list()   = listToProto(iv);
-    else throw std::runtime_error("Unsupported return type");
+    if (iv.isTensor()) {
+        *a.mutable_tensor() = tensorToProto(iv.toTensor());
+    }
+    else if (iv.isTensorList()) {
+        auto tensors = iv.toTensorList().vec();
+        tensorListToProto(tensors, a.mutable_tensor_list());
+    }
+    else if (iv.isScalar()) {
+        *a.mutable_scalar() = scalarToProto(iv);
+    }
+    else if (iv.isList()) {
+        *a.mutable_list() = listToProto(iv);
+    }
+    else {
+        std::string type_name = iv.tagKind();
+        throw std::runtime_error("Unsupported return type: " + type_name);
+    }
     return a;
 }
 
@@ -134,39 +187,134 @@ class RemoteExecutionServiceImpl final
               << req->op_name() << "/" << req->overload_name()
               << " args=" << req->arguments_size() << std::endl;
 
-    torch::jit::Stack stack;
-    for (int i = 0; i < req->arguments_size(); ++i) {
-      auto iv = argToIValue(req->arguments(i));
-      std::cout << "[SERVER]  - Arg " << i 
-                << (iv.isTensor()    ? " Tensor" :
-                   iv.isScalar()    ? " Scalar" :
-                   iv.isList()      ? " List" : " Other")
-                << std::endl;
-      stack.push_back(iv);
-    }
-
-    const char* name = req->op_name().c_str();
-    const char* over = req->overload_name().c_str();
-    std::cout << "[SERVER] Dispatching " << name << "/" << over << std::endl;
-    auto op = c10::Dispatcher::singleton().findSchemaOrThrow(name, over);
     try {
-        at::native::cpu_fallback(op, &stack);
-    //   op.redispatchBoxed(c10::DispatchKeySet(c10::DispatchKey::CPU), &stack);
+        torch::jit::Stack stack;
+        for (int i = 0; i < req->arguments_size(); ++i) {
+            try {
+                auto iv = argToIValue(req->arguments(i));
+                std::cout << "[SERVER]  - Arg " << i 
+                        << (iv.isTensor()    ? " Tensor" :
+                           iv.isScalar()    ? " Scalar" :
+                           iv.isList()      ? " List" :
+                           iv.isTensorList() ? " TensorList" : " Other")
+                        << std::endl;
+                
+                if (iv.isTensor()) {
+                    auto t = iv.toTensor();
+                    std::cout << "[SERVER]    Tensor shape=[";
+                    for (auto d : t.sizes()) {
+                        std::cout << d << ",";
+                    }
+                    std::cout << "] dtype=" << t.dtype().name() << std::endl;
+                }
+                else if (iv.isTensorList()) {
+                    auto tensors = iv.toTensorList().vec();
+                    std::cout << "[SERVER]    TensorList with " << tensors.size() << " tensors" << std::endl;
+                    for (size_t j = 0; j < tensors.size(); j++) {
+                        std::cout << "[SERVER]      Tensor[" << j << "] shape=[";
+                        for (auto d : tensors[j].sizes()) {
+                            std::cout << d << ",";
+                        }
+                        std::cout << "] dtype=" << tensors[j].dtype().name() << std::endl;
+                    }
+                }
+                
+                stack.push_back(iv);
+            } catch (const std::exception& e) {
+                std::cerr << "[SERVER][ERROR] Failed to process argument " << i 
+                        << ": " << e.what() << std::endl;
+                return Status(grpc::StatusCode::INVALID_ARGUMENT, 
+                             "Invalid argument at index " + std::to_string(i) + ": " + e.what());
+            }
+        }
+
+        const std::string& op_name = req->op_name();
+        const std::string& overload_name = req->overload_name();
+        std::cout << "[SERVER] Dispatching " << op_name << "/" << overload_name << std::endl;
+        
+        // Try to find the schema with proper error handling
+        try {
+            // First attempt with the provided overload name
+            auto op = c10::Dispatcher::singleton().findSchemaOrThrow(op_name.c_str(), overload_name.c_str());
+            
+            std::cout << "[SERVER] Found schema: " << op.schema() << std::endl;
+            std::cout << "[SERVER] Argument count: " << stack.size() << std::endl;
+            
+            try {
+                at::native::cpu_fallback(op, &stack);
+                std::cout << "[SERVER] Operation completed successfully" << std::endl;
+            } catch (const std::exception& e) {
+                std::cerr << "[SERVER][ERROR] Dispatch failed: " << e.what() << std::endl;
+                return Status(grpc::StatusCode::INTERNAL, "Dispatch error: " + std::string(e.what()));
+            }
+        } catch (const c10::Error& e) {
+            // If specific overload not found, try with empty overload
+            if (!overload_name.empty()) {
+                std::cout << "[SERVER] Schema not found with specified overload, trying with empty overload" << std::endl;
+                try {
+                    auto op = c10::Dispatcher::singleton().findSchemaOrThrow(op_name.c_str(), "");
+                    
+                    std::cout << "[SERVER] Found schema with empty overload: " << op.schema() << std::endl;
+                    std::cout << "[SERVER] Argument count: " << stack.size() << std::endl;
+                    
+                    try {
+                        at::native::cpu_fallback(op, &stack);
+                        std::cout << "[SERVER] Operation completed successfully" << std::endl;
+                    } catch (const std::exception& e) {
+                        std::cerr << "[SERVER][ERROR] Dispatch failed: " << e.what() << std::endl;
+                        return Status(grpc::StatusCode::INTERNAL, "Dispatch error: " + std::string(e.what()));
+                    }
+                } catch (const c10::Error& e2) {
+                    std::cerr << "[SERVER][ERROR] Schema not found with empty overload either: " 
+                            << e2.what() << std::endl;
+                    return Status(grpc::StatusCode::NOT_FOUND, 
+                                "Schema not found: " + std::string(e.what()));
+                }
+            } else {
+                std::cerr << "[SERVER][ERROR] Schema not found: " << e.what() << std::endl;
+                return Status(grpc::StatusCode::NOT_FOUND, 
+                            "Schema not found: " + std::string(e.what()));
+            }
+        }
+
+        auto out_iv = stack.back();
+        std::cout << "[SERVER] Result type: "
+                << (out_iv.isTensor() ? "Tensor" :
+                    out_iv.isScalar() ? "Scalar" :
+                    out_iv.isList()   ? "List" : 
+                    out_iv.isTensorList() ? "TensorList" : "Other")
+                << std::endl;
+                
+        if (out_iv.isTensor()) {
+            auto t = out_iv.toTensor();
+            std::cout << "[SERVER]    Tensor shape=[";
+            for (auto d : t.sizes()) {
+                std::cout << d << ",";
+            }
+            std::cout << "] dtype=" << t.dtype().name() << std::endl;
+        }
+        else if (out_iv.isTensorList()) {
+            auto tensors = out_iv.toTensorList().vec();
+            std::cout << "[SERVER]    TensorList with " << tensors.size() << " tensors" << std::endl;
+        }
+        
+        try {
+            *resp->mutable_result() = iValueToArg(out_iv);
+            std::cout << "[SERVER] Response serialized successfully" << std::endl;
+        } catch (const std::exception& e) {
+            std::cerr << "[SERVER][ERROR] Failed to serialize result: " << e.what() << std::endl;
+            return Status(grpc::StatusCode::INTERNAL, "Serialization error: " + std::string(e.what()));
+        }
+
+        std::cout << "[SERVER] <== ExecuteOp done" << std::endl;
+        return Status::OK;
     } catch (const std::exception& e) {
-      std::cerr << "[SERVER][ERROR] Dispatch failed: " << e.what() << std::endl;
-      return Status(grpc::StatusCode::UNKNOWN, "Dispatch error: " + std::string(e.what()));
+        std::cerr << "[SERVER][ERROR] Unexpected error in ExecuteOp: " << e.what() << std::endl;
+        return Status(grpc::StatusCode::INTERNAL, "Unexpected error: " + std::string(e.what()));
+    } catch (...) {
+        std::cerr << "[SERVER][ERROR] Unknown error in ExecuteOp" << std::endl;
+        return Status(grpc::StatusCode::INTERNAL, "Unknown error");
     }
-
-    auto out_iv = stack.back();
-    std::cout << "[SERVER] Result type: "
-              << (out_iv.isTensor() ? "Tensor" :
-                  out_iv.isScalar() ? "Scalar" :
-                  out_iv.isList()   ? "List" : "Other")
-              << std::endl;
-    *resp->mutable_result() = iValueToArg(out_iv);
-
-    std::cout << "[SERVER] <== ExecuteOp done" << std::endl;
-    return Status::OK;
   }
 };
 

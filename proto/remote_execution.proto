@@ -12,6 +12,11 @@ message TensorProto {
   string dtype  = 3;
 }
 
+// A list of tensors (for ops like aten::cat, etc.)
+message TensorListProto {
+  repeated TensorProto tensors = 1;
+}
+
 // A scalar type
 message ScalarProto {
   oneof value {
@@ -33,6 +38,7 @@ message Arg {
     TensorProto tensor = 1;
     ScalarProto scalar = 2;
     ListProto   list   = 3;
+    TensorListProto tensor_list  = 4;
   }
 }
 
