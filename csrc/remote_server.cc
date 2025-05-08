@@ -178,55 +178,40 @@ Arg iValueToArg(const c10::IValue& iv) {
     return a;
 }
 
-// Helper function to find the correct operator schema
-c10::OperatorHandle findOperatorSchema(const std::string& op_name, const std::string& overload_name) {
-    // Try with the provided overload first
+c10::OperatorHandle findOperatorSchema(const std::string& op_name, const std::string& requested_overload) {
     try {
-        return c10::Dispatcher::singleton().findSchemaOrThrow(op_name.c_str(), overload_name.c_str());
-    } catch (const c10::Error& e) {
-        // If that fails, try known alternate overloads
+        return c10::Dispatcher::singleton().findSchemaOrThrow(op_name.c_str(), requested_overload.c_str());
+    } catch (const c10::Error& original_error) {
+        const auto& all_ops = c10::Dispatcher::singleton().getAllOpNames();
+        std::vector<std::string> available_overloads;
         
-        // 1. Try with empty overload (many ops use this as default)
-        if (!overload_name.empty()) {
-            try {
-                return c10::Dispatcher::singleton().findSchemaOrThrow(op_name.c_str(), "");
-            } catch (const c10::Error&) {
-                // Continue to next attempt
+        for (const auto& op : all_ops) {
+            if (op.name == op_name) {
+                available_overloads.push_back(op.overload_name);
+                
+                if (op.overload_name != requested_overload) {
+                    try {
+                        auto found_op = c10::Dispatcher::singleton().findSchemaOrThrow(
+                            op_name.c_str(), op.overload_name.c_str());
+                        std::cout << "[SERVER] Found alternative overload: " << op_name 
+                                  << "/" << op.overload_name << std::endl;
+                        return found_op;
+                    } catch (const c10::Error&) {
+                    }
+                }
             }
         }
         
-        // 2. Try with "Tensor" overload (common for arithmetic ops)
-        if (overload_name != "Tensor") {
-            try {
-                return c10::Dispatcher::singleton().findSchemaOrThrow(op_name.c_str(), "Tensor");
-            } catch (const c10::Error&) {
-                // Continue to next attempt
+        if (!available_overloads.empty()) {
+            std::cout << "[SERVER] Could not use any of the available overloads for " << op_name << ":" << std::endl;
+            for (const auto& overload : available_overloads) {
+                std::cout << "  - " << overload << std::endl;
             }
+        } else {
+            std::cout << "[SERVER] No overloads found for " << op_name << std::endl;
         }
         
-        // 3. Special case handling for known ops
-        // For add/sub/mul/div without overload, try "Tensor"
-        if (overload_name.empty() && 
-            (op_name == "aten::add" || op_name == "aten::sub" || 
-             op_name == "aten::mul" || op_name == "aten::div")) {
-            try {
-                return c10::Dispatcher::singleton().findSchemaOrThrow(op_name.c_str(), "Tensor");
-            } catch (const c10::Error&) {
-                // Continue to next attempt
-            }
-        }
-        
-        // 4. Try with "int" overload (common for some ops like softmax)
-        if (overload_name != "int") {
-            try {
-                return c10::Dispatcher::singleton().findSchemaOrThrow(op_name.c_str(), "int");
-            } catch (const c10::Error&) {
-                // Continue to next attempt
-            }
-        }
-        
-        // Rethrow the original error if all attempts fail
-        throw;
+        throw original_error;
     }
 }
 
