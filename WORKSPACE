@@ -16,9 +16,9 @@ http_archive(
 # Load rules_python
 http_archive(
     name = "rules_python",
-    sha256 = "5868e73107a8e85d8f323806e60cad7283f34b32163ea6ff1020cf27abef6036",
-    strip_prefix = "rules_python-0.25.0",
-    url = "https://github.com/bazelbuild/rules_python/releases/download/0.25.0/rules_python-0.25.0.tar.gz",
+    sha256 = "e3f1cc7a04d9b09635afb3130731ed82b5f58eadc8233d4efb59944d92ffc06f",
+    strip_prefix = "rules_python-0.33.2",
+    url = "https://github.com/bazelbuild/rules_python/releases/download/0.33.2/rules_python-0.33.2.tar.gz",
 )
 
 # Initialize rules_python
@@ -94,6 +94,13 @@ load("@rules_proto//proto:repositories.bzl", "rules_proto_dependencies", "rules_
 rules_proto_dependencies()
 rules_proto_toolchains()
 
+http_archive(
+    name = "com_google_protobuf",
+    urls = ["https://github.com/protocolbuffers/protobuf/archive/refs/tags/v3.24.0.tar.gz"],
+    strip_prefix = "protobuf-3.24.0",
+)
+
+
 # gRPC
 http_archive(
     name = "com_github_grpc_grpc",
@@ -107,6 +114,20 @@ grpc_deps()
 
 load("@com_github_grpc_grpc//bazel:grpc_extra_deps.bzl", "grpc_extra_deps")
 grpc_extra_deps()
+
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "rules_proto_grpc",
+    sha256 = "c0d718f4d892c524025504e67a5bfe83360b3a982e654bc71fed7514eb8ac8ad",
+    strip_prefix = "rules_proto_grpc-4.6.0",
+    urls = ["https://github.com/rules-proto-grpc/rules_proto_grpc/archive/4.6.0.tar.gz"],
+)
+
+load("@rules_proto_grpc//:repositories.bzl", "rules_proto_grpc_toolchains", "rules_proto_grpc_repos")
+rules_proto_grpc_toolchains()
+rules_proto_grpc_repos()
+
 
 # Load libtorch
 load("//third_party:libtorch.bzl", "libtorch_repository")
@@ -132,4 +153,22 @@ http_archive(
     strip_prefix = "spdlog-1.12.0",
     sha256 = "4dccf2d10f410c1e2feaff89966bfc49a1abb29ef6f08246335b110e001e09a9",
     build_file = "//third_party:spdlog.BUILD", 
+)
+
+
+load("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+http_archive(
+    name = "rules_cuda",
+    strip_prefix = "rules_cuda-f7cbf72d1834ea4c7f2e56b9c472db4ee08f4902",
+    urls = ["https://github.com/bazel-contrib/rules_cuda/archive/f7cbf72d1834ea4c7f2e56b9c472db4ee08f4902.tar.gz"],
+)
+load("@rules_cuda//cuda:repositories.bzl", "rules_cuda_dependencies", "rules_cuda_toolchains")
+rules_cuda_dependencies()
+rules_cuda_toolchains(register_toolchains = True)
+
+# DPDK
+new_local_repository(
+    name = "dpdk",
+    path = "/usr/local",  # Adjust if your DPDK is installed elsewhere
+    build_file = "//third_party:dpdk_system.BUILD",
 )

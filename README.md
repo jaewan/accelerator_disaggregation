@@ -39,6 +39,7 @@ System strictly transfers the data when it is absolutely necessary.
 ```bash
 sudo apt-get update
 sudo apt-get install python3.10-dev
+sudo apt-get install -y dpdk dpdk-dev libdpdk-dev
 ```
 **MacOS**:
   ```bash
@@ -75,10 +76,13 @@ This script will:
 
 From root directory after build, run
 ```
-# Run all tests
+# Start the server
+bazel run //:remote_execution_server
+# On another terminal, run all tests
 bazel test //tests:*
 # Run one specific test target
 bazel test //tests:test_device
+# Exit the server
 ```
 
 ## TODO

@@ -5,6 +5,8 @@
 #include <c10/core/SymInt.h> 
 #include <ATen/native/CPUFallback.h>
 #include <c10/core/CPUAllocator.h>
+#include "proto/remote_execution.grpc.pb.h"
+#include <grpcpp/grpcpp.h>
 
 /*
  * Fallback works for operators that do not have a more specific kernel registered for PrivateUse1 device.
@@ -52,13 +54,16 @@ const absl::flat_hash_set<std::string> kLocalOps = {
 		 "aten::println",   // CPU-specific: Printing a new line
 		 "aten::set_printoptions", // CPU-specific: set printing options
 
-		 "aten::empty.memory_format", //CPU-specific, allocate tensor based on cpu
 		 */
-
+		 "aten::empty", // Directly allocate tensor on local cpu currently
+		 "aten::normal_", // Need to support Generator if removed
+		 "aten::view",
+		 "aten::reshape",
+		 "aten::as_strided",
 	// Add more operations as needed
 };
 
-at::Tensor change_tensor_device_to_remote_cuda(at::Tensor &cpu_result){
+at::Tensor change_tensor_device_to_remote_cuda(const at::Tensor &cpu_result){
 	size_t tensor_size = cpu_result.numel() * cpu_result.element_size();
 	void* remote_ptr = remote_allocate(tensor_size);
 	memcpy(remote_ptr, cpu_result.data_ptr(), tensor_size);
@@ -75,87 +80,321 @@ at::Tensor change_tensor_device_to_remote_cuda(at::Tensor &cpu_result){
 
 void execute_op_test(const c10::OperatorHandle& op, c10::Stack* stack) {
 	SPDLOG_INFO("test fallback called : {}", op.schema().name());
-	// 1. Copy input tensors to CPU
-	std::vector<at::Tensor> cpu_input_tensors;
-	for (auto& item : *stack) {
-		if (item.isTensor()) {
-			at::Tensor tensor = item.toTensor();
-			if (tensor.device().type() == REMOTE_CUDA_TYPE) {
-				cpu_input_tensors.push_back(tensor.cpu()); // Copy to CPU
-			} else {
-				cpu_input_tensors.push_back(tensor); // Keep CPU tensors as is
-			}
-		} else if (item.isTensorList()) {
-			auto tensorList = item.toTensorList();
-			std::vector<at::Tensor> newTensorList;
-			for (const auto& tensorItemRef : tensorList) {
-				c10::IValue tensorItem = c10::IValue(tensorItemRef);
-				if (tensorItem.isTensor()) {
-					at::Tensor tensor = tensorItem.toTensor();
-					if (tensor.device().type() == REMOTE_CUDA_TYPE) {
-						newTensorList.push_back(tensor.cpu());
-					} else {
-						newTensorList.push_back(tensor);
-					}
-				}
-			}
-			item = newTensorList;
-		}
-	}
+	
+    // Determine the start index of arguments on the stack
+    const auto& schema_args = op.schema().arguments();
+    const size_t num_args = schema_args.size();
+    const size_t args_begin = stack->size() - num_args;
+    auto args = torch::jit::last(stack, num_args);
 
-	// 2. Replace input tensors in stack with CPU copies
-	size_t cpu_tensor_index = 0;
-	for (auto& item : *stack) {
-		if (item.isTensor()) {
-			item = cpu_input_tensors[cpu_tensor_index++];
-		}
-	}
+    // Containers for single-tensor inputs
+    std::vector<int> tensor_indices;
+    std::vector<at::Tensor> remote_tensors;
+    std::vector<at::Tensor> cpu_tensors;
 
-	// 3. Redispatch to CPU
-	op.redispatchBoxed(c10::DispatchKeySet(at::DispatchKey::CPU), stack);
+    // Containers for TensorList inputs
+    std::vector<int> list_indices;
+    std::vector<std::vector<at::Tensor>> remote_lists;
+    std::vector<std::vector<at::Tensor>> cpu_lists;
 
-	// 4. Change output tensors back to REMOTE_CUDA_TYPE
-	for (auto& item : *stack) {
-		if (item.isTensor()) {
-			at::Tensor tensor = item.toTensor();
-			item = change_tensor_device_to_remote_cuda(tensor);
-		} else if (item.isTensorList()) {
-			auto tensorList = item.toTensorList();
-			std::vector<at::Tensor> newTensorList;
-			for (const auto& tensorItemRef : tensorList) {
-				c10::IValue tensorItem = c10::IValue(tensorItemRef);
-				if (tensorItem.isTensor()) {
-					at::Tensor tensor = tensorItem.toTensor();
-					newTensorList.push_back(change_tensor_device_to_remote_cuda(tensor));
-				}
-			}
-			item = newTensorList;
-		}
-	}
+    // Optional Device argument (if present)
+    std::optional<c10::Device> tgt_device;
+
+    // Step 1: Convert all REMOTE_CUDA tensors/lists to CPU
+    for (size_t idx = 0; idx < args.size(); ++idx) {
+        auto& iv = args[idx];
+        // Handle Device arguments
+        if (iv.isDevice()) {
+            tgt_device = iv.toDevice();
+            (*stack)[args_begin + idx] = c10::IValue(c10::Device(c10::DeviceType::CPU));
+            continue;
+        }
+        // Handle single Tensor
+        if (iv.isTensor()) {
+            auto t = iv.toTensor();
+            if (t.device().type() == REMOTE_CUDA_TYPE) {
+                tensor_indices.push_back(idx);
+                remote_tensors.push_back(t);
+                cpu_tensors.push_back(t.cpu());
+                (*stack)[args_begin + idx] = c10::IValue(cpu_tensors.back());
+            }
+        }
+        // Handle TensorList
+        else if (iv.isTensorList()) {
+            auto tl = iv.toTensorList().vec();
+            bool has_remote = false;
+            std::vector<at::Tensor> cpu_list;
+            cpu_list.reserve(tl.size());
+            for (auto& t : tl) {
+                if (t.device().type() == REMOTE_CUDA_TYPE) {
+                    has_remote = true;
+                    cpu_list.push_back(t.cpu());
+                } else {
+                    cpu_list.push_back(t);
+                }
+            }
+            if (has_remote) {
+                list_indices.push_back(idx);
+                remote_lists.push_back(std::move(tl));
+                cpu_lists.push_back(cpu_list);
+                (*stack)[args_begin + idx] = c10::IValue(c10::List<at::Tensor>(cpu_list));
+            }
+        }
+    }
+
+    // Step 2: Call the CPU implementation
+    op.redispatchBoxed(c10::DispatchKeySet(c10::DispatchKey::CPU), stack);
+
+    // Step 3a: Sync in-place writes for single-tensor inputs
+    for (size_t i = 0; i < tensor_indices.size(); ++i) {
+        int idx = tensor_indices[i];
+        const auto* alias_info = schema_args[idx].alias_info();
+        if (alias_info && alias_info->isWrite()) {
+            auto& cpu_t = cpu_tensors[i];
+            auto& orig  = remote_tensors[i];
+            if (cpu_t.defined() && orig.defined()) {
+                at::_copy_from_and_resize(cpu_t, orig);
+            }
+        }
+    }
+
+    // Step 3b: Sync in-place writes for TensorList inputs
+    for (size_t i = 0; i < list_indices.size(); ++i) {
+        int idx = list_indices[i];
+        const auto* alias_info = schema_args[idx].alias_info();
+        if (alias_info && alias_info->isWrite()) {
+            const auto& cpu_list = cpu_lists[i];
+            auto& orig_list = remote_lists[i];
+            for (size_t j = 0; j < orig_list.size(); ++j) {
+                const auto& cpu_t = cpu_list[j];
+                auto& orig_t = orig_list[j];
+                if (cpu_t.defined() && orig_t.defined()) {
+                    at::_copy_from_and_resize(cpu_t, orig_t);
+                }
+            }
+        }
+    }
+
+    // Step 4: Convert outputs back to REMOTE_CUDA device
+    const auto& schema_rets = op.schema().returns();
+    const size_t num_rets = schema_rets.size();
+    const size_t rets_begin = stack->size() - num_rets;
+    if (!tgt_device.has_value() && !remote_tensors.empty()) {
+        tgt_device = remote_tensors[0].device();
+    }
+    for (size_t i = 0; i < num_rets; ++i) {
+        auto& ov = (*stack)[rets_begin + i];
+        if (!tgt_device.has_value()) continue;
+        // Single Tensor output
+        if (ov.isTensor() && ov.toTensor().defined()) {
+            auto out_cpu = ov.toTensor();
+            ov = c10::IValue(change_tensor_device_to_remote_cuda(out_cpu));
+        }
+        // TensorList output
+        else if (ov.isTensorList()) {
+            auto tl = ov.toTensorList().vec();
+            std::vector<at::Tensor> new_list;
+            new_list.reserve(tl.size());
+            for (auto& t : tl) {
+                new_list.push_back(change_tensor_device_to_remote_cuda(t));
+            }
+            ov = c10::IValue(c10::List<at::Tensor>(new_list));
+        }
+    }
+}
+
+// Helper to serialize tensor to TensorProto
+remote_execution::TensorProto tensorToProto(const at::Tensor& tensor) {
+    remote_execution::TensorProto proto;
+    
+    // proto.set_dtype(tensor.dtype().name());
+	proto.set_dtype(std::string(tensor.dtype().name()));
+    for (auto s : tensor.sizes()) {
+        proto.add_shape(s);
+    }
+
+    auto tensor_contig = tensor.contiguous();
+    proto.set_data(tensor_contig.data_ptr(), tensor_contig.nbytes());
+
+    return proto;
+}
+
+remote_execution::ScalarProto scalarToProto(const c10::IValue& iv) {
+    remote_execution::ScalarProto p;
+    if (iv.isInt())        p.set_i(iv.toInt());
+    else if (iv.isDouble()) p.set_f(iv.toDouble());
+    else if (iv.isBool())   p.set_b(iv.toBool());
+    else if (iv.isString()) p.set_s(iv.toStringRef());
+    else throw std::runtime_error("Unsupported scalar type");
+    return p;
+}
+
+c10::IValue scalarFromProto(const remote_execution::ScalarProto& p) {
+    switch (p.value_case()) {
+      case remote_execution::ScalarProto::kI: return (int64_t)p.i();
+      case remote_execution::ScalarProto::kF: return (double)p.f();
+      case remote_execution::ScalarProto::kB: return (bool)p.b();
+      case remote_execution::ScalarProto::kS: return p.s();
+      default: throw std::runtime_error("Unknown scalar");
+    }
+}
+
+remote_execution::ListProto listToProto(const c10::IValue& iv) {
+    if (!iv.isList()) {
+        throw std::runtime_error("Expected List, got non-list IValue");
+    }
+    auto elems = iv.toListRef();
+    remote_execution::ListProto p;
+    for (const auto& elem : elems) {
+        remote_execution::Arg* a = p.add_values();
+        if (elem.isTensor())     *a->mutable_tensor() = tensorToProto(elem.toTensor());
+        else if (elem.isScalar()) *a->mutable_scalar() = scalarToProto(elem);
+        else if (elem.isList())   *a->mutable_list()   = listToProto(elem);
+    }
+    return p;
+}
+
+// Helper to deserialize TensorProto to at::Tensor
+at::Tensor protoToTensor(const remote_execution::TensorProto& proto) {
+    std::vector<int64_t> shape(proto.shape().begin(), proto.shape().end());
+    auto options = at::TensorOptions().dtype(at::ScalarType::Float);  // Add other types as needed
+    
+    at::Tensor tensor = at::empty(shape, options);
+    std::memcpy(tensor.data_ptr(), proto.data().data(), proto.data().size());
+
+    return tensor;
+}
+
+c10::IValue listFromProto(const remote_execution::ListProto& lp) {
+    c10::impl::GenericList gl(c10::AnyType::get());
+    for (const auto& arg : lp.values()) {
+        if (arg.has_tensor())  gl.push_back(protoToTensor(arg.tensor()));
+        else if (arg.has_scalar()) gl.push_back(scalarFromProto(arg.scalar()));
+        else if (arg.has_list())   gl.push_back(listFromProto(arg.list()));
+    }
+    return gl;
 }
 
 // Function to execute an operation on the remote server
-at::Tensor execute_op_remotely(const c10::OperatorHandle& op, c10::Stack* stack) {
-	std::string op_name = op.schema().name();
-	std::string overload_name = op.schema().overload_name();
-	SPDLOG_INFO("[DEBUG] Executing operation from remote {}",op_name);
+c10::IValue execute_op_remotely(
+    const std::string& op_name,
+    const std::string& overload_name,
+    c10::Stack* stack) 
+{
+    // Log the operation request
+    SPDLOG_INFO("[DEBUG] Executing remote op {}/{}",
+                op_name, overload_name);
 
-	// 1. Extract tensors and other necessary arguments from the stack
-	//at::ArrayRef<at::Tensor> tensors = extract_tensors(*stack);
+    remote_execution::OpRequest request;
+    request.set_op_name(op_name);
+    request.set_overload_name(overload_name);
+    
+    // Helper function to detect if a List contains only Tensors
+    auto isTensorList = [](const c10::IValue& iv) -> bool {
+        if (!iv.isList()) return false;
+        
+        auto list_ref = iv.toListRef();
+        if (list_ref.empty()) return false;
+        
+        for (const auto& item : list_ref) {
+            if (!item.isTensor()) return false;
+        }
+        return true;
+    };
+    
+    for (size_t i = 0; i < stack->size(); ++i) {
+        const auto& iv = (*stack)[i];
+        
+        if (iv.isTensor()) {
+            SPDLOG_DEBUG("[CLIENT] Arg {} type=Tensor", i);
+            auto* arg = request.add_arguments();
+            *arg->mutable_tensor() = tensorToProto(iv.toTensor());
+        }
+        else if (iv.isTensorList()) {
+            SPDLOG_DEBUG("[CLIENT] Arg {} type=TensorList with {} tensors", i, iv.toTensorList().size());
+            
+            auto* arg = request.add_arguments();
+            auto tensor_list = iv.toTensorList().vec();
+            for (const auto& t : tensor_list) {
+                *arg->mutable_tensor_list()->add_tensors() = tensorToProto(t);
+            }
+            SPDLOG_DEBUG("[CLIENT] Added {} tensors to TensorList", tensor_list.size());
+        }
+        else if (isTensorList(iv)) {
+            // General handling for List[Tensor] - convert to TensorList for proper serialization
+            SPDLOG_DEBUG("[CLIENT] Arg {} type=List containing only Tensors, converting to TensorList", i);
+            
+            auto* arg = request.add_arguments();
+            auto list_ref = iv.toListRef();
+            for (const auto& item : list_ref) {
+                *arg->mutable_tensor_list()->add_tensors() = tensorToProto(item.toTensor());
+            }
+            SPDLOG_DEBUG("[CLIENT] Converted List to TensorList with {} tensors", list_ref.size());
+        }
+        else if (iv.isScalar()) {
+            SPDLOG_DEBUG("[CLIENT] Arg {} type=Scalar", i);
+            auto* arg = request.add_arguments();
+            *arg->mutable_scalar() = scalarToProto(iv);
+        }
+        else if (iv.isList()) {
+            SPDLOG_DEBUG("[CLIENT] Arg {} type=List", i);
+            auto* arg = request.add_arguments();
+            *arg->mutable_list() = listToProto(iv);
+        }
+        else if (iv.isIntList()) {
+            SPDLOG_DEBUG("[CLIENT] Arg {} type=IntList", i);
+            auto dims = iv.toIntList();  // c10::IntArrayRef
+            auto* arg = request.add_arguments();
+            for (auto d : dims) {
+                auto* entry = arg->mutable_list()->add_values();
+                entry->mutable_scalar()->set_i(d);
+            }
+        }
+        else {
+            SPDLOG_DEBUG("[CLIENT] Arg {} type=Unknown: {}", i, iv.tagKind());
+        }
+    }
 
-	// 2. Serialize and send the operation and arguments to the remote server
-	//at::Tensor result = rpc_client::execute_op(op_name.c_str(), overload_name.c_str(), tensors, *stack);
-	at::Tensor result;
+    SPDLOG_DEBUG("[CLIENT] Created request with {} arguments", request.arguments_size());
 
-	// 3. Deserialize the result from the remote server
-	//update_stack_with_result(*stack, result);
-	// TODO: Implement remote execution logic here
-	// 1. Serialize operation and arguments
-	// 2. Send to remote server
-	// 3. Receive and deserialize results
-	// 4. Update stack with results
+    auto channel = grpc::CreateChannel(
+        "localhost:50051", grpc::InsecureChannelCredentials());
+    auto stub = remote_execution::RemoteExecutionService::NewStub(channel);
+    grpc::ClientContext ctx;
+    remote_execution::OpResponse resp;
+    
+    SPDLOG_DEBUG("[CLIENT] Sending RPC request");
+    auto status = stub->ExecuteOp(&ctx, request, &resp);
+    if (!status.ok()) {
+        SPDLOG_ERROR("[CLIENT] RPC failed: {} ({})", status.error_message(), status.error_code());
+        throw std::runtime_error("RPC failed: " + status.error_message());
+    }
 
-	return result;
+    const auto& result_arg = resp.result();
+    if (result_arg.has_tensor()) {
+        SPDLOG_INFO("[CLIENT] Received result type=Tensor");
+        return protoToTensor(result_arg.tensor());
+    }
+    else if (result_arg.has_tensor_list()) {
+        SPDLOG_INFO("[CLIENT] Received result type=TensorList");
+        std::vector<at::Tensor> tensors;
+        for (const auto& tp : result_arg.tensor_list().tensors()) {
+            tensors.push_back(protoToTensor(tp));
+        }
+        return c10::IValue(c10::List<at::Tensor>(std::move(tensors)));
+    }
+    else if (result_arg.has_scalar()) {
+        SPDLOG_INFO("[CLIENT] Received result type=Scalar");
+        return scalarFromProto(result_arg.scalar());
+    }
+    else if (result_arg.has_list()) {
+        SPDLOG_INFO("[CLIENT] Received result type=List");
+        return listFromProto(result_arg.list());
+    }
+    else {
+        SPDLOG_ERROR("[CLIENT] RPC returned empty Arg");
+        throw std::runtime_error("Empty Arg in response");
+    }
 }
 
 // Function to execute operation locally
@@ -169,31 +408,99 @@ void execute_op_locally(const c10::OperatorHandle& op, c10::Stack* stack) {
 	//op.redispatchBoxed(c10::DispatchKeySet(at::DispatchKey::CPU), stack);
 
 	// Slower but more stable and suggested version
-	at::native::cpu_fallback(op, stack);
+	// at::native::cpu_fallback(op, stack);
+	execute_op_test(op, stack);
+}
+
+std::vector<std::string> getOperatorOverloads(const std::string& op_name) {
+    std::vector<std::string> overloads;
+    const auto& ops = c10::Dispatcher::singleton().getAllOpNames();
+    
+    for (const auto& op : ops) {
+        if (op.name == op_name) {
+            overloads.push_back(op.overload_name);
+        }
+    }
+    
+    return overloads;
+}
+
+std::string findBestOverload(const std::string& op_name, const std::string& requested_overload) {
+    if (requested_overload != "out") {
+        return requested_overload;
+    }
+    
+    auto overloads = getOperatorOverloads(op_name);
+    
+    if (std::find(overloads.begin(), overloads.end(), "") != overloads.end()) {
+        return "";
+    }
+    
+    if (std::find(overloads.begin(), overloads.end(), "Tensor") != overloads.end()) {
+        return "Tensor";
+    }
+    
+    return requested_overload;
 }
 
 // Define a boxed fallback function outside the registerFallback call
 void remote_cuda_fallback(const c10::OperatorHandle& op, c10::Stack* stack) {
-	const std::string& op_name = op.schema().name();
-	SPDLOG_INFO("[DEBUG] remote_cuda_fallback called : {}", op_name);
+    const auto& schema = op.schema();
+    const std::string& op_name = schema.name();            // e.g. "aten::add"
+    std::string overload_name = schema.overload_name();   // e.g. "out" or "Tensor"
 
-	// Check if the operation should be executed locally
-	if (kLocalOps.count(op_name)) {
-		execute_op_locally(op, stack);
-	} else {
-		// Move stack to remote_cuda device
-		for (c10::IValue& ivalue : *stack) {
-			if (ivalue.isTensor()) {
-				at::Tensor tensor = ivalue.toTensor();
-				if (tensor.device().type() != c10::DeviceType::PrivateUse1) {
-					ivalue = tensor.to(c10::Device(c10::DeviceType::PrivateUse1, 0));
-				}
-			}
-		}
-		at::Tensor result = execute_op_remotely(op, stack);
-		stack->clear();
-		stack->push_back(result);
-	}
+    SPDLOG_INFO("[DEBUG] remote_cuda_fallback called: {}.{}", op_name, overload_name);
+
+    if (kLocalOps.count(op_name)) {
+        execute_op_locally(op, stack);
+        return;
+    }
+
+    bool is_out = (overload_name == "out");
+    std::string remote_overload = findBestOverload(op_name, overload_name);
+    
+    if (is_out && remote_overload != overload_name) {
+        SPDLOG_DEBUG("[CLIENT] Mapped out variant of {} to use overload '{}'", op_name, remote_overload);
+    }
+
+    c10::IValue out_placeholder;
+    if (is_out) {
+        out_placeholder = stack->back();
+        stack->pop_back();
+    }
+
+    c10::IValue result = execute_op_remotely(op_name, remote_overload, stack);
+
+    stack->clear();
+
+    if (is_out && result.isTensor()) {
+        at::_copy_from_and_resize(
+            result.toTensor(),
+            out_placeholder.toTensor()
+        );
+        stack->push_back(out_placeholder);
+    } 
+    else if (result.isTensor()) {
+        at::Tensor cpu_res = result.toTensor();
+        at::Tensor remote_res = change_tensor_device_to_remote_cuda(cpu_res);
+        stack->push_back(remote_res);
+    }
+    // TensorList handling
+    else if (result.isTensorList()) {
+        auto tensor_list = result.toTensorList().vec();
+        std::vector<at::Tensor> remote_tensors;
+        remote_tensors.reserve(tensor_list.size());
+        
+        for (const auto& cpu_tensor : tensor_list) {
+            remote_tensors.push_back(change_tensor_device_to_remote_cuda(cpu_tensor));
+        }
+        
+        stack->push_back(c10::IValue(c10::List<at::Tensor>(std::move(remote_tensors))));
+    }
+    // Scalar, List, etc.
+    else {
+        stack->push_back(result);
+    }
 }
 
 void register_dispatch_keys() {
@@ -287,20 +594,21 @@ at::Tensor test_handle_empty_strided(c10::IntArrayRef size, c10::IntArrayRef str
 
 at::Tensor handle_copy_from(const at::Tensor& self, const at::Tensor& dst, bool non_blocking) {
 	SPDLOG_INFO("[DEBUG] [Manual Kernel] copy_from called");
-	// Ensure the destination tensor is on your custom device
-	TORCH_CHECK(dst.device().type() == c10::DeviceType::PrivateUse1,
-			"_copy_from: Destination tensor must be on the REMOTE_CUDA device");
+	// // Ensure the destination tensor is on your custom device
+	// TORCH_CHECK(dst.device().type() == c10::DeviceType::PrivateUse1,
+	// 		"_copy_from: Destination tensor must be on the REMOTE_CUDA device");
 
-	// Ensure the source tensor is not on your custom device
-	TORCH_CHECK(self.device().type() != c10::DeviceType::PrivateUse1,
-			"_copy_from: Source tensor must not be on the REMOTE_CUDA device");
+	// // Ensure the source tensor is not on your custom device
+	// TORCH_CHECK(self.device().type() != c10::DeviceType::PrivateUse1,
+	// 		"_copy_from: Source tensor must not be on the REMOTE_CUDA device");
 
 	// 1. Serialize the source tensor's data
 	const void* src_data = self.data_ptr();
 	size_t src_num_bytes = self.nbytes();
 
 	// For demonstration, log the copy operation
-	SPDLOG_INFO("[DEBUG] [Manual Kernel] Copying {} bytes from CPU to REMOTE_CUDA device", src_num_bytes);
+	SPDLOG_INFO("[DEBUG] [Manual Kernel] Copying {} bytes from {} to {}", 
+				src_num_bytes, self.device().str(), dst.device().str());
 
 	// 2. Allocate memory on the remote device (if not already allocated)
 	void* dest_data = dst.data_ptr();
@@ -312,6 +620,12 @@ at::Tensor handle_copy_from(const at::Tensor& self, const at::Tensor& dst, bool 
 	// 4. Return the destination tensor
 	return dst;
 }
+
+at::Tensor handle_copy_from_and_resize(const at::Tensor& self, const at::Tensor& dst) {
+	SPDLOG_INFO("[DEBUG] [Manual Kernel] copy_from_and_resize called");
+	return handle_copy_from(self, dst, false);
+}
+
 
 at::Tensor& handle_copy_(at::Tensor& self, const at::Tensor& src, bool non_blocking) {
 	SPDLOG_INFO("[DEBUG] [Manual Kernel] copy_ called");
@@ -397,10 +711,10 @@ at::Tensor const& handle_resize_(at::Tensor const& self,
 TORCH_LIBRARY_IMPL(aten, PrivateUse1, m) {
 	m.impl("empty_strided", remote_cuda::handle_empty_strided);
 	m.impl("_copy_from", remote_cuda::handle_copy_from);
-	m.impl("copy_", remote_cuda::handle_copy_);
+	m.impl("_copy_from_and_resize", remote_cuda::handle_copy_from_and_resize);
 }
 
 TORCH_LIBRARY_IMPL(_, PrivateUse1, m) {
-	//m.fallback(torch::CppFunction::makeFromBoxedFunction<&remote_cuda::remote_cuda_fallback>());
-	m.fallback(torch::CppFunction::makeFromBoxedFunction<&remote_cuda::execute_op_test>());
+	m.fallback(torch::CppFunction::makeFromBoxedFunction<&remote_cuda::remote_cuda_fallback>());
+	// m.fallback(torch::CppFunction::makeFromBoxedFunction<&remote_cuda::execute_op_test>());
 }
