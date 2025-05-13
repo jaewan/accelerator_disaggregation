@@ -76,10 +76,13 @@ This script will:
 
 From root directory after build, run
 ```
-# Run all tests
+# Start the server
+bazel run //:remote_execution_server
+# On another terminal, run all tests
 bazel test //tests:*
 # Run one specific test target
 bazel test //tests:test_device
+# Exit the server
 ```
 
 ## TODO
