@@ -14,28 +14,34 @@ CUDA_LDFLAGS = -L$(CUDA_PATH)/lib64 -lcuda -lcudart
 
 # GDRCopy flags
 GDRCOPY_CFLAGS = -I$(GDRCOPY_PATH)/include
-GDRCOPY_LDFLAGS = -L$(GDRCOPY_PATH)/lib -lgdrapi
+GDRCOPY_LDFLAGS = -L$(GDRCOPY_PATH)/lib 
 
 # Common flags
-COMMON_FLAGS = -Wall -O3 -std=c++11 -pthread
+COMMON_FLAGS = -Wall -O0 -std=c++17 -pthread -g
 
 # Server CUDA kernel
 SERVER_CUDA_SRC = server_cuda_kernel.cu
 SERVER_CUDA_OBJ = server_cuda_kernel.o
 
 # Main targets
-server: server.o $(SERVER_CUDA_OBJ)
+server: server.o rpc-service.o $(SERVER_CUDA_OBJ)
 	$(CC) $(COMMON_FLAGS) -o $@ $^ $(DPDK_FLAGS) $(CUDA_LDFLAGS) $(GDRCOPY_LDFLAGS)
 
-client: client.o
+client: client.o rpc-client.o
 	$(CC) $(COMMON_FLAGS) -o $@ $^ $(DPDK_FLAGS)
 
 # Object files
-server.o: server.cpp
+server.o: server.cpp future.hpp
+	$(CC) $(COMMON_FLAGS) $(DPDK_FLAGS) $(CUDA_CFLAGS) $(GDRCOPY_CFLAGS) -c -o $@ $<
+
+rpc-service.o: rpc-service.cpp
 	$(CC) $(COMMON_FLAGS) $(DPDK_FLAGS) $(CUDA_CFLAGS) $(GDRCOPY_CFLAGS) -c -o $@ $<
 
 client.o: client.cpp
 	$(CC) $(COMMON_FLAGS) $(DPDK_FLAGS) -c -o $@ $<
+
+rpc-client.o: rpc-client.cpp
+	$(CC) $(COMMON_FLAGS) $(DPDK_FLAGS) $(CUDA_CFLAGS) $(GDRCOPY_CFLAGS) -c -o $@ $<
 
 $(SERVER_CUDA_OBJ): $(SERVER_CUDA_SRC)
 	$(CUDA_CC) --compile -o $@ $< -I$(CUDA_PATH)/include

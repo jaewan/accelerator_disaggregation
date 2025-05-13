@@ -26,81 +26,31 @@
 #include <chrono>
 #include <queue>
 #include <algorithm>
-
-// Configuration constants
-#define RX_RING_SIZE 1024
-#define TX_RING_SIZE 1024
-#define NUM_MBUFS 8191
-#define MBUF_CACHE_SIZE 250
-#define MAX_BURST_SIZE 32
-#define MAX_PAYLOAD_SIZE 1400    // Max payload size to keep packet under MTU
-#define MAX_WINDOW_SIZE 64       // Flow control window size
-#define ACK_TIMEOUT_MS 10        // Timeout for ACK in milliseconds
-#define MAX_RETRIES 5            // Maximum retransmission attempts
+#include <iostream>
+#include "client.hpp"
 
 // Default port settings
-#define DEFAULT_CLIENT_PORT 12345
-#define DEFAULT_SERVER_PORT 12346
-#define DEFAULT_CLIENT_IP "192.168.1.10"
-#define DEFAULT_SERVER_IP "192.168.1.20"
+#define DEFAULT_CLIENT_PORT 0
+#define DEFAULT_SERVER_PORT 0
+#define DEFAULT_CLIENT_IP "10.10.2.10"
+#define DEFAULT_SERVER_IP "10.10.1.10"
+
+const char* ether = "42:01:0a:8f:00:07";
+
+std::unordered_map<uint64_t, Request> rpc_lookup;
 
 // DPDK port configuration
 static struct rte_eth_conf port_conf = {
     .rxmode = {
-        .mq_mode = RTE_ETH_MQ_RX_RSS,
-        .max_rx_pkt_len = RTE_ETHER_MAX_LEN,
+        .mq_mode = RTE_ETH_MQ_RX_NONE,
+        .mtu = 8896,
     },
     .txmode = {
         .mq_mode = RTE_ETH_MQ_TX_NONE,
-        .offloads = RTE_ETH_TX_OFFLOAD_IPV4_CKSUM | RTE_ETH_TX_OFFLOAD_UDP_CKSUM,
+        .offloads =  0, //| RTE_ETH_TX_OFFLOAD_IPV4_CKSUM,
     },
 };
 
-// Custom packet header for reliability
-struct packet_header {
-    uint32_t seq_num;        // Sequence number
-    uint32_t ack_num;        // Acknowledgement number
-    uint16_t flags;          // Control flags
-    uint16_t window;         // Flow control window
-    uint32_t payload_size;   // Size of payload in bytes
-    uint32_t total_size;     // Total size of data being transferred
-    uint32_t offset;         // Offset of this chunk in the total data
-};
-
-// Flag definitions
-#define PKT_FLAG_DATA   0x0001  // Data packet
-#define PKT_FLAG_ACK    0x0002  // Acknowledgement
-#define PKT_FLAG_SYN    0x0004  // Synchronize sequence numbers
-#define PKT_FLAG_FIN    0x0008  // Finish connection
-#define PKT_FLAG_RST    0x0010  // Reset connection
-
-// Packet tracking structure
-struct packet_info {
-    uint32_t seq_num;                // Sequence number
-    std::chrono::steady_clock::time_point send_time;  // Time when packet was sent
-    uint8_t retries;                 // Number of retransmission attempts
-    struct rte_mbuf *pkt;            // Packet mbuf
-    uint32_t payload_size;           // Size of packet payload
-
-    packet_info(uint32_t seq, struct rte_mbuf *p, uint32_t size)
-        : seq_num(seq), send_time(std::chrono::steady_clock::now()),
-          retries(0), pkt(p), payload_size(size) {}
-};
-
-// Connection state
-struct connection_state {
-    uint32_t next_seq_num;           // Next sequence number to use
-    uint32_t last_ack_received;      // Last acknowledgement received
-    uint16_t remote_window;          // Remote flow control window
-    std::map<uint32_t, packet_info> unacked_pkts;  // Unacknowledged packets
-    std::mutex mutex;                // Mutex for thread safety
-    bool connected;                  // Connection established
-    bool fin_sent;                   // FIN sent
-
-    connection_state() : next_seq_num(0), last_ack_received(0),
-                       remote_window(MAX_WINDOW_SIZE), connected(false),
-                       fin_sent(false) {}
-};
 
 // Global variables
 static volatile bool force_quit = false;
@@ -141,6 +91,15 @@ int main(int argc, char **argv) {
         return -1;
     }
 
+    // Initialize EAL
+    ret = init_eal(argc, argv);
+    if (ret < 0) {
+        rte_exit(EXIT_FAILURE, "Error initializing EAL\n");
+    }
+
+    argc -= ret;
+    argv += ret;
+
     // Parse server MAC address
     if (rte_ether_unformat_addr(argv[1], &server_mac) < 0) {
         printf("Invalid server MAC address\n");
@@ -170,12 +129,6 @@ int main(int argc, char **argv) {
         client_port = htons(atoi(argv[6]));
     } else {
         client_port = htons(DEFAULT_CLIENT_PORT);
-    }
-
-    // Initialize EAL
-    ret = init_eal(argc, argv);
-    if (ret < 0) {
-        rte_exit(EXIT_FAILURE, "Error initializing EAL\n");
     }
 
     // Create mempool for mbufs
@@ -212,57 +165,25 @@ int main(int argc, char **argv) {
         rte_exit(EXIT_FAILURE, "Failed to establish connection\n");
     }
 
-    printf("Connected to server. Sending data...\n");
+    printf("Connected to server.\n");
 
-    // Read data from file
-    FILE *fp = fopen(argv[2], "rb");
-    if (fp == NULL) {
-        printf("Failed to open data file: %s\n", argv[2]);
-        close_connection();
-        cleanup();
-        return -1;
-    }
+    auto start = std::chrono::high_resolution_clock::now();
 
-    // Get file size
-    fseek(fp, 0, SEEK_END);
-    size_t file_size = ftell(fp);
-    fseek(fp, 0, SEEK_SET);
+    uint64_t tensor_1 = rpc_init_clnt(conn);
 
-    // Allocate buffer for file data
-    uint8_t *file_data = (uint8_t *)malloc(file_size);
-    if (file_data == NULL) {
-        printf("Failed to allocate memory for file data\n");
-        fclose(fp);
-        close_connection();
-        cleanup();
-        return -1;
-    }
+    uint64_t tensor_2 = rpc_init_clnt(conn);
 
-    // Read file data
-    size_t bytes_read = fread(file_data, 1, file_size, fp);
-    fclose(fp);
+    uint64_t tensor_3 = rpc_operation_clnt(conn, tensor_1, tensor_2, OpCode::Matmul);
 
-    if (bytes_read != file_size) {
-        printf("Failed to read file data\n");
-        free(file_data);
-        close_connection();
-        cleanup();
-        return -1;
-    }
+    void* result = rpc_materialize_clnt(conn, tensor_3);
 
-    // Send file data
-    printf("Sending %zu bytes of data...\n", file_size);
-    ret = send_data(file_data, file_size);
-    free(file_data);
+    auto end = std::chrono::high_resolution_clock::now();
 
-    if (ret < 0) {
-        printf("Failed to send data\n");
-        close_connection();
-        cleanup();
-        return -1;
-    }
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start);
 
-    printf("Data sent successfully. Closing connection...\n");
+    std::cout << "Time taken: " << duration.count() << " microseconds" << std::endl;  
+
+    printf("Computation finished successfully. \n");
 
     // Close connection
     close_connection();
@@ -369,12 +290,12 @@ static int establish_connection() {
     // Store the sent packet for potential retransmission
     {
         std::lock_guard<std::mutex> lock(conn.mutex);
-        conn.unacked_pkts[conn.next_seq_num] = packet_info(conn.next_seq_num, syn_pkt, 0);
+        conn.unacked_pkts.emplace(conn.next_seq_num, packet_info(conn.next_seq_num, syn_pkt, 0));
         conn.next_seq_num++;
     }
 
     // Wait for connection to be established (SYN-ACK received)
-    int timeout_ms = 1000;  // 1 second
+    int timeout_ms = 100000;  // 1 second
     auto start_time = std::chrono::steady_clock::now();
 
     while (!conn.connected && !force_quit) {
@@ -412,7 +333,7 @@ static int create_packet(struct rte_mbuf **pkt_ptr, uint32_t seq_num, uint16_t f
 
     // Calculate packet size
     uint16_t total_length = sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr) +
-                           sizeof(struct packet_header) + payload_size;
+                           sizeof(struct rte_ether_hdr) + payload_size;
 
     // 1. Set up Ethernet header
     struct rte_ether_hdr *eth_hdr = rte_pktmbuf_mtod(pkt, struct rte_ether_hdr *);
@@ -429,9 +350,12 @@ static int create_packet(struct rte_mbuf **pkt_ptr, uint32_t seq_num, uint16_t f
     ip_hdr->next_proto_id = IPPROTO_UDP;
     ip_hdr->src_addr = client_ip;
     ip_hdr->dst_addr = server_ip;
+    ip_hdr->hdr_checksum = 0;
+    uint16_t cksum = rte_ipv4_cksum(ip_hdr);
+    ip_hdr->hdr_checksum = cksum;
 
     // Let hardware calculate IP checksum
-    pkt->ol_flags |= RTE_MBUF_F_TX_IPV4 | RTE_MBUF_F_TX_IP_CKSUM;
+    // pkt->ol_flags |= RTE_MBUF_F_TX_IPV4 | RTE_MBUF_F_TX_IP_CKSUM;
 
     // 3. Set up UDP header
     struct rte_udp_hdr *udp_hdr = (struct rte_udp_hdr *)(ip_hdr + 1);
@@ -523,7 +447,7 @@ static int send_data(const void *data, size_t len) {
         // Store the sent packet for potential retransmission
         {
             std::lock_guard<std::mutex> lock(conn.mutex);
-            conn.unacked_pkts[seq_num] = packet_info(seq_num, pkt, bytes_to_send);
+            conn.unacked_pkts.insert_or_assign(seq_num, packet_info(seq_num, pkt, bytes_to_send));
         }
 
         bytes_sent += bytes_to_send;
@@ -582,7 +506,39 @@ static void process_received_packet(struct rte_mbuf *pkt) {
 
     // Parse Ethernet header
     struct rte_ether_hdr *eth_hdr = rte_pktmbuf_mtod(pkt, struct rte_ether_hdr *);
-    if (eth_hdr->ether_type != rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4)) {
+    if (eth_hdr->ether_type == rte_cpu_to_be_16(RTE_ETHER_TYPE_ARP)) {
+        struct rte_arp_hdr *arp_hdr = (struct rte_arp_hdr *)(eth_hdr + 1);
+
+        if (arp_hdr->arp_opcode == rte_cpu_to_be_16(RTE_ARP_OP_REQUEST) &&
+            arp_hdr->arp_data.arp_tip == inet_addr(DEFAULT_CLIENT_IP)) {
+
+            // Extra nice efficiency by just modifying this packet
+            struct rte_ether_addr sender_mac = eth_hdr->src_addr;
+            struct rte_ether_addr local_mac;
+            rte_ether_unformat_addr(ether, &local_mac);
+            uint32_t sender_ip = arp_hdr->arp_data.arp_sip;
+            
+
+            // Set Ethernet header
+            eth_hdr->dst_addr = sender_mac;
+            eth_hdr->src_addr = local_mac;
+            eth_hdr->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_ARP);
+
+            // Set ARP reply
+            arp_hdr->arp_opcode = rte_cpu_to_be_16(RTE_ARP_OP_REPLY);
+            arp_hdr->arp_data.arp_tip = sender_ip;
+            arp_hdr->arp_data.arp_sip = inet_addr(DEFAULT_CLIENT_IP);
+            rte_ether_addr_copy(&local_mac, &arp_hdr->arp_data.arp_sha);
+            rte_ether_addr_copy(&sender_mac, &arp_hdr->arp_data.arp_tha);
+
+            // Send it back
+            uint16_t nb_tx = rte_eth_tx_burst(port_id, 0, &pkt, 1);
+            if (nb_tx < 1)
+                rte_pktmbuf_free(pkt);
+            return;
+        }
+    }
+    else if (eth_hdr->ether_type != rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4)) {
         // Not an IPv4 packet, ignore
         rte_pktmbuf_free(pkt);
         return;
@@ -635,6 +591,12 @@ static void process_received_packet(struct rte_mbuf *pkt) {
                 ++it;
             }
         }
+
+        if (hdr->flags & PKT_FLAG_FIN) {
+            force_quit = true;
+        }
+    } else if (hdr->flags & PKT_FLAG_DATA) {
+        rpc_lookup[hdr->rpc_num].fulfilled = true;
     }
 
     // Free the received mbuf
@@ -731,7 +693,7 @@ static void close_connection() {
     int timeout_ms = 1000;  // 1 second
     auto start_time = std::chrono::steady_clock::now();
 
-		while (!force_quit) {
+	while (!force_quit) {
         // Check for timeout
         auto now = std::chrono::steady_clock::now();
         auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - start_time).count();
@@ -781,4 +743,77 @@ static void cleanup() {
     rte_eal_cleanup();
 
     printf("Cleanup complete\n");
+}
+
+// Create a packet with proper headers
+int create_rpc_request(struct rte_mbuf **pkt_ptr, const void *payload,
+    uint32_t payload_size, uint32_t rpc_id, uint64_t rpc_num) {
+
+    struct rte_mbuf *pkt = rte_pktmbuf_alloc(mbuf_pool);
+    if (pkt == NULL) {
+        RTE_LOG(ERR, USER1, "Failed to allocate mbuf for packet\n");
+        return -1;
+    }
+
+    // Calculate packet size
+    uint16_t total_length = sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr) +
+           sizeof(struct rte_ether_hdr) + payload_size;
+
+    // 1. Set up Ethernet header
+    struct rte_ether_hdr *eth_hdr = rte_pktmbuf_mtod(pkt, struct rte_ether_hdr *);
+    rte_ether_addr_copy(&server_mac, &eth_hdr->dst_addr);
+    rte_eth_macaddr_get(port_id, &eth_hdr->src_addr);
+    eth_hdr->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4);
+
+    // 2. Set up IP header
+    struct rte_ipv4_hdr *ip_hdr = (struct rte_ipv4_hdr *)(eth_hdr + 1);
+    memset(ip_hdr, 0, sizeof(struct rte_ipv4_hdr));
+    ip_hdr->version_ihl = RTE_IPV4_VHL_DEF;  // IP version 4, header length 5 (20 bytes)
+    ip_hdr->total_length = rte_cpu_to_be_16(total_length);
+    ip_hdr->time_to_live = 64;  // TTL
+    ip_hdr->next_proto_id = IPPROTO_UDP;
+    ip_hdr->src_addr = client_ip;
+    ip_hdr->dst_addr = server_ip;
+    ip_hdr->hdr_checksum = 0;
+
+    // Let hardware calculate IP checksum
+    // pkt->ol_flags |= RTE_MBUF_F_TX_IPV4 | RTE_MBUF_F_TX_IP_CKSUM;
+
+    // 3. Set up UDP header
+    struct rte_udp_hdr *udp_hdr = (struct rte_udp_hdr *)(ip_hdr + 1);
+    udp_hdr->src_port = client_port;
+    udp_hdr->dst_port = server_port;
+    udp_hdr->dgram_len = rte_cpu_to_be_16(sizeof(struct rte_udp_hdr) +
+                         sizeof(struct packet_header) + payload_size);
+
+    // Let hardware calculate UDP checksum
+    pkt->ol_flags |= RTE_MBUF_F_TX_UDP_CKSUM;
+    udp_hdr->dgram_cksum = 0;  // Set to 0 for hardware to fill in
+
+    // 4. Set up packet header
+    struct packet_header *hdr = (struct packet_header *)(udp_hdr + 1);
+    memset(hdr, 0, sizeof(struct packet_header));
+    hdr->flags = PKT_FLAG_DATA;
+    /* Don't care */
+    //hdr->seq_num = seq_num;
+    //hdr->window = MAX_WINDOW_SIZE;
+    //hdr->payload_size = payload_size; 
+    //hdr->total_size = total_size;
+    //hdr->offset = offset;
+    hdr->rpc_id = rpc_id;
+    hdr->rpc_num = rpc_num;
+
+    // 5. Copy payload if any
+    if (payload != NULL && payload_size > 0) {
+    uint8_t *payload_ptr = (uint8_t *)(hdr + 1);
+    memcpy(payload_ptr, payload, payload_size);
+    }
+
+    // 6. Set the packet length
+    pkt->data_len = sizeof(struct rte_ether_hdr) + total_length;
+    pkt->pkt_len = pkt->data_len;
+
+    // Return the packet
+    *pkt_ptr = pkt;
+    return 0;
 }

@@ -7,8 +7,8 @@
 #include <rte_malloc.h>
 #include <rte_mempool.h>
 #include <rte_memzone.h>
-#include <rte_gpu.h>
-#include <rte_gpu_comm.h>
+#include <rte_gpudev.h>
+//#include <rte_gpu_comm.h>
 #include <rte_timer.h>
 #include <rte_lcore.h>
 #include <rte_cycles.h>
@@ -25,93 +25,37 @@
 #include <signal.h>
 #include <arpa/inet.h>
 #include <map>
+#include <unordered_map>
+#include <functional>
 #include <vector>
 #include <mutex>
 #include <thread>
 #include <atomic>
 #include <condition_variable>
 #include <queue>
-
-// Configuration constants
-#define RX_RING_SIZE 1024
-#define TX_RING_SIZE 1024
-#define NUM_MBUFS 8191
-#define MBUF_CACHE_SIZE 250
-#define MAX_BURST_SIZE 32
-#define MAX_PAYLOAD_SIZE 1400  // Max payload size to keep packet under MTU
-#define MAX_WINDOW_SIZE 64     // Flow control window size
-#define ACK_TIMEOUT_MS 10      // Timeout for ACK in milliseconds
-#define MAX_RETRIES 5          // Maximum retransmission attempts
-#define GPU_PAGE_SIZE (1UL << 16)
-#define GPU_BATCH_SIZE 32      // Number of packets processed in one GPU batch
-
-// Use pinned memory for DPDK mbuf pool
-#define USE_PINNED_MEMORY_POOL 1
-#define MEMPOOL_DATAROOM_SIZE (RTE_MBUF_DEFAULT_BUF_SIZE)
+#include <rte_arp.h>
+#include <rte_byteorder.h>
+#include "server-util.hpp"
+#include "rpc-common.hpp"
 
 // Default port settings
-#define DEFAULT_SERVER_PORT 12346
-#define DEFAULT_SERVER_IP "192.168.1.20"
+#define DEFAULT_SERVER_PORT 0
+#define DEFAULT_SERVER_IP "10.10.1.10"
+#define DEFAULT_CLIENT_IP "10.10.2.10"
 
 // DPDK port configuration
 static struct rte_eth_conf port_conf = {
     .rxmode = {
-        .mq_mode = RTE_ETH_MQ_RX_RSS,
-        .max_rx_pkt_len = RTE_ETHER_MAX_LEN,
+        .mq_mode = RTE_ETH_MQ_RX_NONE,
+        .mtu = 8896,
     },
     .txmode = {
         .mq_mode = RTE_ETH_MQ_TX_NONE,
-        .offloads = RTE_ETH_TX_OFFLOAD_IPV4_CKSUM | RTE_ETH_TX_OFFLOAD_UDP_CKSUM,
+        .offloads = 0,
     },
 };
 
-// Custom packet header for reliability
-struct packet_header {
-    uint32_t seq_num;        // Sequence number
-    uint32_t ack_num;        // Acknowledgement number 
-    uint16_t flags;          // Control flags
-    uint16_t window;         // Flow control window
-    uint32_t payload_size;   // Size of payload in bytes
-    uint32_t total_size;     // Total size of data being transferred
-    uint32_t offset;         // Offset of this chunk in the total data
-};
-
-// Flag definitions
-#define PKT_FLAG_DATA   0x0001  // Data packet
-#define PKT_FLAG_ACK    0x0002  // Acknowledgement
-#define PKT_FLAG_SYN    0x0004  // Synchronize sequence numbers
-#define PKT_FLAG_FIN    0x0008  // Finish connection
-#define PKT_FLAG_RST    0x0010  // Reset connection
-
-// Connection identifier
-struct connection_id {
-    uint32_t client_ip;      // Client IP address
-    uint16_t client_port;    // Client port
-    
-    bool operator<(const connection_id &other) const {
-        if (client_ip != other.client_ip)
-            return client_ip < other.client_ip;
-        return client_port < other.client_port;
-    }
-};
-
-// State structure for tracking connections
-struct connection_state {
-    uint32_t next_seq_num;            // Next expected sequence number
-    uint32_t last_ack_sent;           // Last acknowledgement sent
-    uint16_t recv_window;             // Current receive window size
-    std::map<uint32_t, rte_mbuf*> out_of_order_pkts;  // Buffer for out-of-order packets
-    std::mutex mutex;                 // Mutex for thread safety
-    bool active;                      // Connection status
-    struct rte_ether_addr client_mac; // Client MAC address
-    uint32_t client_ip;               // Client IP address
-    uint16_t client_port;             // Client port
-    
-    connection_state() : next_seq_num(0), last_ack_sent(0), 
-                        recv_window(MAX_WINDOW_SIZE), active(true) {
-        memset(&client_mac, 0, sizeof(client_mac));
-    }
-};
+static struct rte_ether_addr server_mac;
 
 // Structure for batch metadata to synchronize between main thread and GPU worker
 struct batch_metadata {
@@ -123,7 +67,7 @@ struct batch_metadata {
 
 // Packet batch queue for communication between main thread and GPU worker
 struct batch_queue {
-    std::queue<std::shared_ptr<batch_metadata>> queue;  // Queue of batches
+    std::queue<std::shared_ptr<batch_metadata>> queue; // Queue of batches
     std::mutex mutex;                                  // Mutex for thread safety
     std::condition_variable cv;                        // Condition variable for signaling
     std::atomic<bool> stop;                            // Stop flag for worker threads
@@ -144,6 +88,9 @@ static std::thread gpu_worker_thread;  // GPU worker thread
 static batch_queue batch_q;            // Batch queue for GPU processing
 static std::atomic<uint64_t> processed_batches(0);  // Counter for batches processed
 
+using rpc_handler_t = std::function<void(struct rte_mbuf *, const connection_state&)>;
+std::unordered_map<uint32_t, rpc_handler_t> rpc_handlers;
+
 // Function prototypes
 static void signal_handler(int signum);
 static int init_eal(int argc, char **argv);
@@ -157,6 +104,7 @@ static int send_ack(const connection_state &conn, uint32_t ack_num, uint16_t win
 static void gpu_worker_function(void);
 static void process_gpu_batch(std::shared_ptr<batch_metadata> batch);
 static void cleanup(void);
+static void init_rpc(void);
 
 // CUDA functions imported from server_cuda_kernel.cu
 extern "C" {
@@ -183,6 +131,7 @@ int main(int argc, char **argv) {
     // Parse command line arguments
     uint16_t port = DEFAULT_SERVER_PORT;
     const char *ip_addr = DEFAULT_SERVER_IP;
+    rte_ether_unformat_addr("42:01:0A:8F:00:08", &server_mac);
     
     // Initialize EAL
     ret = init_eal(argc, argv);
@@ -218,15 +167,7 @@ int main(int argc, char **argv) {
     printf("  IP: %s, Port: %d\n", ip_addr, port);
     
     // Create mempool for mbufs with pinned memory
-#if USE_PINNED_MEMORY_POOL
-    mbuf_pool = create_pinned_mempool("PINNED_MBUF_POOL", NUM_MBUFS,
-                                   MBUF_CACHE_SIZE, 0, MEMPOOL_DATAROOM_SIZE, 
-                                   rte_socket_id());
-    if (mbuf_pool == NULL) {
-        rte_exit(EXIT_FAILURE, "Cannot create pinned mbuf pool\n");
-    }
-    printf("Using CUDA-pinned mempool for zero-copy access\n");
-#else
+
     mbuf_pool = rte_pktmbuf_pool_create("MBUF_POOL", NUM_MBUFS,
         MBUF_CACHE_SIZE, 0, RTE_MBUF_DEFAULT_BUF_SIZE, 
         rte_socket_id());
@@ -234,24 +175,25 @@ int main(int argc, char **argv) {
         rte_exit(EXIT_FAILURE, "Cannot create mbuf pool\n");
     }
     printf("Using standard DPDK mempool\n");
-#endif
     
     // Initialize GPU
-    ret = init_gpu();
-    if (ret < 0) {
-        rte_exit(EXIT_FAILURE, "Error initializing GPU\n");
-    }
+    //ret = init_gpu();
+    //if (ret < 0) {
+    //    rte_exit(EXIT_FAILURE, "Error initializing GPU\n");
+    //}
     
     // Initialize port
     ret = init_port(port_id, mbuf_pool);
     if (ret < 0) {
         rte_exit(EXIT_FAILURE, "Error initializing port %d\n", port_id);
     }
+
+    init_rpc();
     
     printf("Server initialized. Waiting for packets...\n");
     
     // Start GPU worker thread
-    gpu_worker_thread = std::thread(gpu_worker_function);
+    //gpu_worker_thread = std::thread(gpu_worker_function);
     
     // Main packet processing loop
     while (!force_quit) {
@@ -285,14 +227,6 @@ int main(int argc, char **argv) {
             }
         }
         
-        // Print statistics occasionally
-        static uint64_t last_printed_batches = 0;
-        uint64_t current_batches = processed_batches.load();
-        if (current_batches >= last_printed_batches + 100) {
-            printf("Processed %lu GPU batches\n", current_batches);
-            last_printed_batches = current_batches;
-        }
-        
         // Give other processes a chance to run
         usleep(100);
     }
@@ -320,63 +254,6 @@ static int init_eal(int argc, char **argv) {
     return ret;
 }
 
-// Create a mempool with CUDA-pinned memory
-static struct rte_mempool *create_pinned_mempool(const char *name, unsigned int n, 
-                                               unsigned int cache_size, uint16_t priv_size,
-                                               uint16_t data_room_size, int socket_id) {
-    struct rte_mempool *mp;
-    size_t elt_size;
-    void *addr;
-    
-    // Calculate the size of each element in the mempool
-    elt_size = sizeof(struct rte_mbuf) + priv_size + data_room_size;
-    
-    // Round up to cache line size
-    elt_size = RTE_ALIGN_CEIL(elt_size, RTE_CACHE_LINE_SIZE);
-    
-    // Create a mempool with external memory
-    mp = rte_mempool_create_empty(name, n, elt_size, cache_size, priv_size,
-                                socket_id, 0);
-    if (mp == NULL) {
-        RTE_LOG(ERR, USER1, "Cannot create mempool\n");
-        return NULL;
-    }
-    
-    // Allocate memory using cudaHostAlloc with the cudaHostAllocPortable flag
-    // This ensures the memory is accessible by any GPU in the system
-    cudaError_t cuda_err = cudaHostAlloc(&addr, n * elt_size,
-                                      cudaHostAllocPortable | cudaHostAllocMapped);
-    if (cuda_err != cudaSuccess) {
-        RTE_LOG(ERR, USER1, "CUDA host alloc failed: %s\n", cudaGetErrorString(cuda_err));
-        rte_mempool_free(mp);
-        return NULL;
-    }
-    
-    // Populate the mempool with the pinned memory
-    if (rte_mempool_populate_default_bulk(mp, addr, n) < 0) {
-        RTE_LOG(ERR, USER1, "Cannot populate mempool\n");
-        cudaFreeHost(addr);
-        rte_mempool_free(mp);
-        return NULL;
-    }
-    
-    // Set the mempool ops
-    rte_mempool_set_ops_byname(mp, "ring_mp_mc", NULL);
-    
-    // Initialize the mbuf pool
-    rte_pktmbuf_pool_init(mp, data_room_size);
-    
-    // Initialize each mbuf in the pool
-    if (rte_mempool_obj_iter(mp, rte_pktmbuf_init, NULL) != 0) {
-        RTE_LOG(ERR, USER1, "Cannot init mbufs\n");
-        cudaFreeHost(addr);
-        rte_mempool_free(mp);
-        return NULL;
-    }
-    
-    return mp;
-}
-
 // Initialize GPU and set up GPU memory
 static int init_gpu(void) {
     int ret;
@@ -391,19 +268,19 @@ static int init_gpu(void) {
     // Use the first available GPU
     gpu_dev_id = 0;
     
-    // Get the GPU device
-    struct rte_gpu *gpu = rte_gpu_get_by_id(gpu_dev_id);
-    if (gpu == NULL) {
-        RTE_LOG(ERR, USER1, "Cannot get GPU device\n");
-        return -1;
-    }
+    //// Get the GPU device
+    //struct rte_gpu *gpu = rte_gpu_get_by_id(gpu_dev_id);
+    //if (gpu == NULL) {
+    //    RTE_LOG(ERR, USER1, "Cannot get GPU device\n");
+    //    return -1;
+    //}
     
-    // Initialize CUDA resources
-    ret = cuda_init(gpu_dev_id);
-    if (ret != 0) {
-        RTE_LOG(ERR, USER1, "Failed to initialize CUDA resources\n");
-        return -1;
-    }
+    //// Initialize CUDA resources
+    //ret = cuda_init(gpu_dev_id);
+    //if (ret != 0) {
+    //    RTE_LOG(ERR, USER1, "Failed to initialize CUDA resources\n");
+    //    return -1;
+    //}
     
     printf("GPU initialized: device_id=%d\n", gpu_dev_id);
     return 0;
@@ -465,10 +342,21 @@ static int init_port(uint16_t port_id, struct rte_mempool *mbuf_pool) {
     // Enable promiscuous mode
     ret = rte_eth_promiscuous_enable(port_id);
     if (ret < 0) {
-        return ret;
+        RTE_LOG(ERR, USER1, "Promiscuous mode not enabled\n");
     }
     
     return 0;
+}
+
+static void init_rpc(void) {
+
+    rpc_handlers[1] = rpc_materialize_svc;
+
+    rpc_handlers[RPC_SERVER_INIT] = rpc_init_svc;
+
+    rpc_handlers[RPC_SERVER_RESERVE] = rpc_reserve_svc;
+
+    rpc_handlers[RPC_SERVER_OPERATION] = rpc_operation_svc;
 }
 
 // Process a received packet
@@ -479,11 +367,52 @@ static void process_packet(struct rte_mbuf *pkt, std::vector<struct rte_mbuf *> 
     
     // Parse Ethernet header
     struct rte_ether_hdr *eth_hdr = rte_pktmbuf_mtod(pkt, struct rte_ether_hdr *);
-    if (eth_hdr->ether_type != rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4)) {
+
+    // ARP response
+    if (eth_hdr->ether_type == rte_cpu_to_be_16(RTE_ETHER_TYPE_ARP)) {
+        struct rte_arp_hdr *arp_hdr = (struct rte_arp_hdr *)(eth_hdr + 1);
+
+        uint32_t source_ip = arp_hdr->arp_data.arp_sip;
+        uint32_t target_ip = arp_hdr->arp_data.arp_tip;
+
+        struct in_addr local_ip_addr;
+
+        inet_pton(AF_INET, DEFAULT_SERVER_IP, &local_ip_addr);
+        uint32_t local_ip = local_ip_addr.s_addr;
+
+        if (arp_hdr->arp_opcode == rte_cpu_to_be_16(RTE_ARP_OP_REQUEST) &&
+            target_ip == local_ip) {
+
+            // Extra nice efficiency by just modifying this packet
+            struct rte_ether_addr sender_mac = eth_hdr->src_addr;
+
+            // Set Ethernet header
+            rte_ether_addr_copy(&sender_mac, &eth_hdr->dst_addr);
+            rte_ether_addr_copy(&server_mac, &eth_hdr->src_addr);
+            eth_hdr->ether_type = RTE_ETHER_TYPE_ARP;
+
+        
+
+            // Set ARP reply
+            arp_hdr->arp_opcode = RTE_ARP_OP_REPLY;
+            arp_hdr->arp_data.arp_sip = target_ip;
+            arp_hdr->arp_data.arp_tip = source_ip;
+            rte_ether_addr_copy(&server_mac, &arp_hdr->arp_data.arp_sha);
+            rte_ether_addr_copy(&sender_mac, &arp_hdr->arp_data.arp_tha);
+
+            // Send it back
+            uint16_t nb_tx = rte_eth_tx_burst(port_id, 0, &pkt, 1);
+            if (nb_tx < 1)
+                rte_pktmbuf_free(pkt);
+            return;
+        }
+    } else if (eth_hdr->ether_type != rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4)) {
         // Not an IPv4 packet, ignore
         rte_pktmbuf_free(pkt);
         return;
     }
+
+    
     
     // Parse IP header
     struct rte_ipv4_hdr *ip_hdr = (struct rte_ipv4_hdr *)(eth_hdr + 1);
@@ -492,6 +421,13 @@ static void process_packet(struct rte_mbuf *pkt, std::vector<struct rte_mbuf *> 
         rte_pktmbuf_free(pkt);
         return;
     }
+    if (ip_hdr->src_addr != inet_addr(DEFAULT_CLIENT_IP)) {
+        rte_pktmbuf_free(pkt);
+        return; 
+    }
+
+    //printf("Got an IP Packet with IP %d and port %d\n", ip_hdr->src_addr, udp_hdr->src_port);
+    
     
     // Parse UDP header
     struct rte_udp_hdr *udp_hdr = (struct rte_udp_hdr *)(ip_hdr + 1);
@@ -503,6 +439,7 @@ static void process_packet(struct rte_mbuf *pkt, std::vector<struct rte_mbuf *> 
     
     // Parse packet header
     struct packet_header *hdr = (struct packet_header *)(udp_hdr + 1);
+    void *pkt_data = (void *)(hdr + 1);
     
     // Create connection ID from client information
     connection_id conn_id;
@@ -542,6 +479,7 @@ static void process_packet(struct rte_mbuf *pkt, std::vector<struct rte_mbuf *> 
     }
     else if (hdr->flags & PKT_FLAG_FIN) {
         // Connection termination
+        printf("Finished\n");
         conn.active = false;
         
         // Send FIN-ACK
@@ -562,6 +500,17 @@ static void process_packet(struct rte_mbuf *pkt, std::vector<struct rte_mbuf *> 
     else if (hdr->flags & PKT_FLAG_DATA) {
         // Data packet
         std::lock_guard<std::mutex> conn_lock(conn.mutex);
+
+        if(hdr->rpc_id > RPC_SERVER_MIN && hdr->rpc_id < RPC_SERVER_MAX) {
+            const connection_state& conn_ref = conn;
+            printf("rpc id %d\n", hdr->rpc_id);
+            auto it = rpc_handlers.find(hdr->rpc_id);
+            if (it != rpc_handlers.end() && it->second) {
+                it->second(pkt, conn_ref);
+            }
+            return;
+            // Do not free the packet
+        }
         
         if (hdr->seq_num == conn.next_seq_num) {
             // In-order packet, process immediately
@@ -774,11 +723,11 @@ static void process_gpu_batch(std::shared_ptr<batch_metadata> batch) {
         packet_sizes[i] = custom_hdr->payload_size;
     }
 
-    // Process packets on the GPU - with pinned memory, no explicit registration needed
-    int ret = cuda_process_packets(packet_data_ptrs, packet_sizes, num_packets);
-    if (ret != 0) {
-        RTE_LOG(ERR, USER1, "GPU packet processing failed\n");
-    }
+    //// Process packets on the GPU - with pinned memory, no explicit registration needed
+    //int ret = cuda_process_packets(packet_data_ptrs, packet_sizes, num_packets);
+    //if (ret != 0) {
+    //    RTE_LOG(ERR, USER1, "GPU packet processing failed\n");
+    //}
 
     // Free all packet mbufs now that GPU processing is complete
     for (auto &pkt : batch->mbufs) {
@@ -818,7 +767,7 @@ static void cleanup(void) {
     }
 
     // Cleanup CUDA resources
-    cuda_cleanup();
+    //cuda_cleanup();
 
     // Free all buffered packets
     std::lock_guard<std::mutex> lock(conn_mutex);
@@ -872,4 +821,70 @@ static void cleanup(void) {
     rte_eal_cleanup();
 
     printf("Cleanup complete\n");
+}
+
+int send_data(const connection_state &conn, const void *payload, uint32_t payload_size) {
+    struct rte_mbuf *pkt = rte_pktmbuf_alloc(mbuf_pool);
+    if (pkt == NULL) {
+        RTE_LOG(ERR, USER1, "Failed to allocate mbuf for Data\n");
+        return -1;
+    }
+
+    // Calculate total packet size
+    uint16_t total_length = sizeof(struct rte_ipv4_hdr) + sizeof(struct rte_udp_hdr) +
+                           sizeof(struct rte_ether_hdr) + payload_size;
+
+    // 1. Set up Ethernet header
+    struct rte_ether_hdr *eth_hdr = rte_pktmbuf_mtod(pkt, struct rte_ether_hdr *);
+    rte_ether_addr_copy(&conn.client_mac, &eth_hdr->dst_addr);
+    rte_eth_macaddr_get(port_id, &eth_hdr->src_addr);
+    eth_hdr->ether_type = rte_cpu_to_be_16(RTE_ETHER_TYPE_IPV4);
+
+    // 2. Set up IP header
+    struct rte_ipv4_hdr *ip_hdr = (struct rte_ipv4_hdr *)(eth_hdr + 1);
+    memset(ip_hdr, 0, sizeof(struct rte_ipv4_hdr));
+    ip_hdr->version_ihl = RTE_IPV4_VHL_DEF;  // IP version 4, header length 5 (20 bytes)
+    ip_hdr->total_length = rte_cpu_to_be_16(total_length);
+    ip_hdr->time_to_live = 64;  // TTL
+    ip_hdr->next_proto_id = IPPROTO_UDP;
+    ip_hdr->src_addr = server_ip;
+    ip_hdr->dst_addr = conn.client_ip;
+
+    // Let hardware calculate IP checksum
+    pkt->ol_flags |= RTE_MBUF_F_TX_IPV4 | RTE_MBUF_F_TX_IP_CKSUM;
+
+    // 3. Set up UDP header
+    struct rte_udp_hdr *udp_hdr = (struct rte_udp_hdr *)(ip_hdr + 1);
+    udp_hdr->src_port = server_port;
+    udp_hdr->dst_port = conn.client_port;
+    udp_hdr->dgram_len = rte_cpu_to_be_16(sizeof(struct rte_udp_hdr) + sizeof(struct packet_header));
+
+    // Let hardware calculate UDP checksum
+    pkt->ol_flags |= RTE_MBUF_F_TX_UDP_CKSUM;
+    udp_hdr->dgram_cksum = 0;  // Set to 0 for hardware to fill in
+
+    // 4. Set up packet header
+    struct packet_header *hdr = (struct packet_header *)(udp_hdr + 1);
+    memset(hdr, 0, sizeof(struct packet_header));
+    hdr->flags = PKT_FLAG_DATA;
+
+    // 5. Copy payload if any
+    if (payload != NULL && payload_size > 0) {
+        uint8_t *payload_ptr = (uint8_t *)(hdr + 1);
+        memcpy(payload_ptr, payload, payload_size);
+    }
+
+    // 6. Set the packet length
+    pkt->data_len = sizeof(struct rte_ether_hdr) + total_length;
+    pkt->pkt_len = pkt->data_len;
+
+    // Send the ACK packet
+    uint16_t sent = rte_eth_tx_burst(port_id, 0, &pkt, 1);
+    if (sent != 1) {
+        RTE_LOG(WARNING, USER1, "Failed to send ACK packet\n");
+        rte_pktmbuf_free(pkt);
+        return -1;
+    }
+
+    return 0;
 }

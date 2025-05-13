@@ -169,3 +169,6 @@ The code implements the following reliability features that you should observe w
    - The code is optimized for correctness and demonstration, not for maximum performance
    - Production code would need additional tuning for specific hardware
 
+sudo ./server -l 0 --no-pci --huge-dir=/mnt/huge --vdev="net_pcap1,iface=ens6,rx_pcap=dpdk_server_rx.pcap,tx_pcap=dpdk_server_tx.pcap" --socket-mem=1024 --file-prefix=server
+
+sudo ./client -l 1 -n 4 --no-pci --huge-dir=/mnt/huge --vdev="net_pcap0,iface=ens6,rx_pcap=dpdk_server_tx.pcap,tx_pcap=dpdk_server_rx.pcap" --socket-mem=1024 --file-prefix=client -- 42:01:0a:0a:01:0a testdata.bin
