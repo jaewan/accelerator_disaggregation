@@ -214,11 +214,33 @@ def main(argv: List[str] | None = None):
         _safe_rpc_shutdown()
         LOGGER.info("RPC server shut down.")
 
-def get_worker_rref():
-    """Return an RRef to the singleton RemoteWorker."""
+
+def run_stateless_forward(state_dict: Dict[str, torch.Tensor], input_ids: torch.Tensor, kv_cache: Any | None = None):
+    """RPC wrapper to call stateless forward on the global worker and return outputs."""
     if _GLOBAL_WORKER is None:
-        raise RuntimeError("RemoteWorker instance not created on this node")
-    return rpc.RRef(_GLOBAL_WORKER)
+        raise RuntimeError("Worker not initialised")
+    return _GLOBAL_WORKER.run_stateless_forward_remote(state_dict, input_ids, kv_cache)
+
+
+def load_weights(state_dict: Dict[str, torch.Tensor]):
+    """RPC wrapper to call load_weights on the global worker."""
+    if _GLOBAL_WORKER is None:
+        raise RuntimeError("Worker not initialised")
+    _GLOBAL_WORKER.load_weights_remote(state_dict)
+
+
+def run_prefill(token_ids: torch.Tensor):
+    """RPC wrapper to call run_prefill on the global worker."""
+    if _GLOBAL_WORKER is None:
+        raise RuntimeError("Worker not initialised")
+    return _GLOBAL_WORKER.run_prefill_remote(token_ids)
+
+
+def run_decode_step(token_id: torch.Tensor, kv_cache_id: str):
+    """RPC wrapper to call run_decode_step on the global worker."""
+    if _GLOBAL_WORKER is None:
+        raise RuntimeError("Worker not initialised")
+    return _GLOBAL_WORKER.run_decode_step_remote(token_id, kv_cache_id)
 
 
 # Ensure this module is discoverable under the name 'rpc_server' even when executed

@@ -60,6 +60,23 @@ def _parse_args(argv: List[str] | None = None):
 # Helper utilities
 # --------------------------------------------------------------------------------------
 
+def _measure_tensor_bytes(*objects) -> int:
+    """Calculate total bytes for tensors/objects being sent over RPC."""
+    total_bytes = 0
+    for obj in objects:
+        if obj is None:
+            continue
+        elif hasattr(obj, 'nbytes'):  # torch.Tensor
+            total_bytes += obj.nbytes
+        elif isinstance(obj, dict):  # state_dict
+            total_bytes += sum(v.nbytes for v in obj.values() if hasattr(v, 'nbytes'))
+        elif isinstance(obj, (list, tuple)):  # KV cache or nested structures
+            total_bytes += _measure_tensor_bytes(*obj)
+        elif isinstance(obj, str):  # KV cache IDs
+            total_bytes += len(obj.encode('utf-8'))
+    return total_bytes
+
+
 def _init_rpc_for_client(args):
     os.environ["MASTER_ADDR"] = args.gpu_host
     os.environ["MASTER_PORT"] = str(args.master_port)
@@ -97,6 +114,21 @@ def _shutdown_rpc():
 
 
 # --------------------------------------------------------------------------------------
+# Network measurement results container
+# --------------------------------------------------------------------------------------
+
+class NetworkMetrics:
+    """Container for network transfer measurements."""
+    def __init__(self):
+        self.bytes_sent = 0
+        self.bytes_received = 0
+    
+    @property
+    def total_bytes(self) -> int:
+        return self.bytes_sent + self.bytes_received
+
+
+# --------------------------------------------------------------------------------------
 # Execution paths
 # --------------------------------------------------------------------------------------
 
@@ -115,6 +147,9 @@ def _run_local(args):
         _run_prefill_local(model, input_ids)
     else:
         _run_decode_local(model, tokenizer, input_ids)
+    
+    # Local mode transfers 0 bytes over network
+    print("NETWORK_BYTES: 0")
 
 
 def _run_prefill_local(model, input_ids):
@@ -150,6 +185,7 @@ def _get_worker_rref():
 
 def _run_naive_remote(args):
     LOGGER.info("Running NAIVE-REMOTE mode, phase=%s", args.phase)
+    metrics = NetworkMetrics()
 
     # Initialize RPC.
     _init_rpc_for_client(args)
@@ -157,8 +193,7 @@ def _run_naive_remote(args):
     # Obtain RemoteWorker RRef (function is looked up on the *remote* module).
     import rpc_server  # noqa: WPS433
 
-    worker_rref = rpc.rpc_sync("GPU_WORKER", rpc_server.get_worker_rref)
-    LOGGER.info("Connected to GPU_WORKER; using RRef for RPC.")
+    LOGGER.info("Connected to GPU_WORKER; using wrapper RPC functions.")
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     model = AutoModelForCausalLM.from_pretrained(args.model)
@@ -167,48 +202,116 @@ def _run_naive_remote(args):
     input_ids = tokenizer(args.prompt, return_tensors="pt").input_ids
 
     if args.phase == "prefill":
-        logits, _ = worker_rref.rpc_sync().run_stateless_forward_remote(state_dict, input_ids)
+        # Measure bytes sent
+        bytes_sent = _measure_tensor_bytes(state_dict, input_ids)
+        metrics.bytes_sent += bytes_sent
+        
+        logits, _ = rpc.rpc_sync("GPU_WORKER", rpc_server.run_stateless_forward, args=(state_dict, input_ids))
+        
+        # Measure bytes received
+        bytes_received = _measure_tensor_bytes(logits)
+        metrics.bytes_received += bytes_received
+        
         LOGGER.info("Remote prefill logits shape %s", logits.shape)
     else:
-        logits, kv_cache = worker_rref.rpc_sync().run_stateless_forward_remote(state_dict, input_ids)
+        # Initial prefill call
+        bytes_sent = _measure_tensor_bytes(state_dict, input_ids)
+        metrics.bytes_sent += bytes_sent
+        
+        logits, kv_cache = rpc.rpc_sync("GPU_WORKER", rpc_server.run_stateless_forward, args=(state_dict, input_ids))
+        
+        bytes_received = _measure_tensor_bytes(logits, kv_cache)
+        metrics.bytes_received += bytes_received
+        
+        # Decode steps
         for step in range(5):
             next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
-            logits, kv_cache = worker_rref.rpc_sync().run_stateless_forward_remote(state_dict, next_token, kv_cache)
+            
+            # Measure bytes sent (full state_dict + token + KV cache every time)
+            bytes_sent = _measure_tensor_bytes(state_dict, next_token, kv_cache)
+            metrics.bytes_sent += bytes_sent
+            
+            logits, kv_cache = rpc.rpc_sync(
+                "GPU_WORKER", rpc_server.run_stateless_forward, args=(state_dict, next_token, kv_cache)
+            )
+            
+            # Measure bytes received
+            bytes_received = _measure_tensor_bytes(logits, kv_cache)
+            metrics.bytes_received += bytes_received
+            
         LOGGER.info("Remote decode complete; final logits shape %s", logits.shape)
 
     _shutdown_rpc()
+    
+    # Output network bytes for experiment driver to capture
+    print(f"NETWORK_BYTES: {metrics.total_bytes}")
 
 
 def _run_sys_simulated(args):
     LOGGER.info("Running SYS_SIMULATED mode, phase=%s", args.phase)
+    metrics = NetworkMetrics()
 
     _init_rpc_for_client(args)
     import rpc_server  # noqa: WPS433
 
-    worker_rref = rpc.rpc_sync("GPU_WORKER", rpc_server.get_worker_rref)
-    LOGGER.info("Connected to GPU_WORKER; using RRef for RPC.")
+    LOGGER.info("Connected to GPU_WORKER for sys_simulated mode.")
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     model = AutoModelForCausalLM.from_pretrained(args.model)
     state_dict = model.state_dict()
 
-    LOGGER.info("Connected to GPU_WORKER for sys_simulated mode (loading weights once).")
     # Load weights on the remote worker exactly once.
-    worker_rref.rpc_sync().load_weights_remote(state_dict)
+    bytes_sent = _measure_tensor_bytes(state_dict)
+    metrics.bytes_sent += bytes_sent
+    
+    rpc.rpc_sync("GPU_WORKER", rpc_server.load_weights, args=(state_dict,))
 
     input_ids = tokenizer(args.prompt, return_tensors="pt").input_ids
 
     if args.phase == "prefill":
-        logits, kv_id = worker_rref.rpc_sync().run_prefill_remote(input_ids)
+        # Only send input_ids (weights already loaded)
+        bytes_sent = _measure_tensor_bytes(input_ids)
+        metrics.bytes_sent += bytes_sent
+        
+        logits, kv_id = rpc.rpc_sync("GPU_WORKER", rpc_server.run_prefill, args=(input_ids,))
+        
+        # Receive logits and KV cache ID (just a string)
+        bytes_received = _measure_tensor_bytes(logits, kv_id)
+        metrics.bytes_received += bytes_received
+        
         LOGGER.info("SYS_SIM prefill logits %s, kv_id %s", logits.shape, kv_id)
     else:
-        logits, kv_id = worker_rref.rpc_sync().run_prefill_remote(input_ids)
+        # Initial prefill
+        bytes_sent = _measure_tensor_bytes(input_ids)
+        metrics.bytes_sent += bytes_sent
+        
+        logits, kv_id = rpc.rpc_sync("GPU_WORKER", rpc_server.run_prefill, args=(input_ids,))
+        
+        bytes_received = _measure_tensor_bytes(logits, kv_id)
+        metrics.bytes_received += bytes_received
+        
+        # Decode steps - only send new token + KV cache ID
         for step in range(5):
             next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
-            logits, kv_id = worker_rref.rpc_sync().run_decode_step_remote(next_token, kv_id)
+            
+            # Only send token and cache ID (much smaller than naive mode)
+            bytes_sent = _measure_tensor_bytes(next_token, kv_id)
+            metrics.bytes_sent += bytes_sent
+            
+            logits, kv_id = rpc.rpc_sync(
+                "GPU_WORKER", rpc_server.run_decode_step, args=(next_token, kv_id)
+            )
+            
+            # Receive logits and same KV cache ID
+            bytes_received = _measure_tensor_bytes(logits, kv_id)
+            metrics.bytes_received += bytes_received
+            
         LOGGER.info("SYS_SIM decode complete; final logits shape %s", logits.shape)
 
     _shutdown_rpc()
+    
+    # Output network bytes for experiment driver to capture
+    print(f"NETWORK_BYTES: {metrics.total_bytes}")
 
 
 # --------------------------------------------------------------------------------------
