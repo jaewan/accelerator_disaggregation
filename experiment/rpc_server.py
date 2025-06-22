@@ -170,6 +170,14 @@ def main(argv: List[str] | None = None):
         args.master_port,
     )
 
+    # Create the global worker instance before RPC init so that other threads can access.
+    global _GLOBAL_WORKER_RREF  # noqa: PLW0603
+    _GLOBAL_WORKER: RemoteWorker = RemoteWorker(model_name=args.model)
+
+    def _get_worker_rref():  # noqa: D401
+        """Return an RRef to the singleton RemoteWorker instance."""
+        return rpc.RRef(_GLOBAL_WORKER)
+
     rpc.init_rpc(
         name="GPU_WORKER",
         rank=args.rank,
@@ -178,6 +186,9 @@ def main(argv: List[str] | None = None):
             num_worker_threads=16, rpc_timeout=300
         ),
     )
+
+    # Register the getter globally so clients can reference by attribute
+    globals()["get_worker_rref"] = _get_worker_rref
 
     # Keep process alive until interrupted.
     def _handle_sigterm(signum, frame):  # noqa: D401
