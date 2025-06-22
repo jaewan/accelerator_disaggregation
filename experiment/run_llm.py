@@ -24,9 +24,9 @@ import sys
 import time
 from typing import Any, Dict, List, Tuple
 
-import torch
-from torch.distributed import rpc
-from transformers import AutoModelForCausalLM, AutoTokenizer
+import torch  # type: ignore
+from torch.distributed import rpc  # type: ignore
+from transformers import AutoModelForCausalLM, AutoTokenizer  # type: ignore
 
 # --------------------------------------------------------------------------------------
 # Logging setup
@@ -77,8 +77,23 @@ def _init_rpc_for_client(args):
 
 
 def _shutdown_rpc():
-    if rpc.is_initialized():
+    """Attempt to cleanly shut down the RPC framework.
+
+    The RPC API does not expose a stable, public "is_initialized" helper across
+    PyTorch versions. Instead, we optimistically call ``rpc.shutdown()`` and
+    silently ignore the *specific* RuntimeError that is raised when RPC has not
+    been initialised in the current process. This makes the shutdown helper
+    version-agnostic and idempotent.
+    """
+    try:
+        # This will be a no-op if RPC was never initialised in this process.
         rpc.shutdown()
+    except RuntimeError as exc:
+        # Match the exact error string used by PyTorch to indicate the agent is
+        # not set up. If a different error bubbles up, re-raise so we do not
+        # hide genuine failures.
+        if "RPC has not been initialized" not in str(exc):
+            raise
 
 
 # --------------------------------------------------------------------------------------
@@ -169,12 +184,13 @@ def _run_sys_simulated(args):
     _init_rpc_for_client(args)
     import rpc_server  # noqa: WPS433
 
-    LOGGER.info("Connected to GPU_WORKER for sys_simulated mode.")
-    rpc.rpc_sync("GPU_WORKER", rpc_server.load_weights, args=(state_dict,))
-
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     model = AutoModelForCausalLM.from_pretrained(args.model)
     state_dict = model.state_dict()
+
+    LOGGER.info("Connected to GPU_WORKER for sys_simulated mode (loading weights once).")
+    # Load weights on the remote worker exactly once.
+    rpc.rpc_sync("GPU_WORKER", rpc_server.load_weights, args=(state_dict,))
 
     input_ids = tokenizer(args.prompt, return_tensors="pt").input_ids
 

@@ -17,9 +17,9 @@ import time
 import uuid
 from typing import Any, Dict, List, Tuple
 
-import torch
-from torch.distributed import rpc
-from transformers import AutoConfig, AutoModelForCausalLM
+import torch  # type: ignore
+from torch.distributed import rpc  # type: ignore
+from transformers import AutoConfig, AutoModelForCausalLM  # type: ignore
 
 logging.basicConfig(
     level=logging.INFO,
@@ -191,9 +191,17 @@ def main(argv: List[str] | None = None):
     _GLOBAL_WORKER_RREF = rpc.RRef(_GLOBAL_WORKER)
 
     # Keep process alive until interrupted.
+    def _safe_rpc_shutdown():
+        """Attempt to shut down the RPC agent without raising if it's already closed."""
+        try:
+            rpc.shutdown()
+        except RuntimeError as exc:
+            if "RPC has not been initialized" not in str(exc):
+                raise
+
     def _handle_sigterm(signum, frame):  # noqa: D401
         LOGGER.info("Received signal %s; shutting down RPC.", signum)
-        rpc.shutdown()
+        _safe_rpc_shutdown()
         sys.exit(0)
 
     signal.signal(signal.SIGTERM, _handle_sigterm)
@@ -206,7 +214,7 @@ def main(argv: List[str] | None = None):
     except KeyboardInterrupt:
         pass
     finally:
-        rpc.shutdown()
+        _safe_rpc_shutdown()
         LOGGER.info("RPC server shut down.")
 
 
