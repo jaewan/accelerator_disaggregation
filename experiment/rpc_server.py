@@ -28,6 +28,10 @@ logging.basicConfig(
 )
 LOGGER = logging.getLogger(__name__)
 
+# Global references populated on the server node after initialisation
+_GLOBAL_WORKER: RemoteWorker | None = None  # type: ignore
+_GLOBAL_WORKER_RREF: rpc.RRef | None = None  # type: ignore
+
 # --------------------------------------------------------------------------------------
 # Remote worker implementation
 # --------------------------------------------------------------------------------------
@@ -171,12 +175,8 @@ def main(argv: List[str] | None = None):
     )
 
     # Create the global worker instance before RPC init so that other threads can access.
-    global _GLOBAL_WORKER_RREF  # noqa: PLW0603
-    _GLOBAL_WORKER: RemoteWorker = RemoteWorker(model_name=args.model)
-
-    def _get_worker_rref():  # noqa: D401
-        """Return an RRef to the singleton RemoteWorker instance."""
-        return rpc.RRef(_GLOBAL_WORKER)
+    global _GLOBAL_WORKER, _GLOBAL_WORKER_RREF  # noqa: PLW0603
+    _GLOBAL_WORKER = RemoteWorker(model_name=args.model)
 
     rpc.init_rpc(
         name="GPU_WORKER",
@@ -187,8 +187,8 @@ def main(argv: List[str] | None = None):
         ),
     )
 
-    # Register the getter globally so clients can reference by attribute
-    globals()["get_worker_rref"] = _get_worker_rref
+    # Now that RPC is ready, create RRef and expose getter.
+    _GLOBAL_WORKER_RREF = rpc.RRef(_GLOBAL_WORKER)
 
     # Keep process alive until interrupted.
     def _handle_sigterm(signum, frame):  # noqa: D401
@@ -208,6 +208,29 @@ def main(argv: List[str] | None = None):
     finally:
         rpc.shutdown()
         LOGGER.info("RPC server shut down.")
+
+
+def get_worker_rref():  # noqa: D401
+    """Return an RRef to the singleton RemoteWorker.
+
+    Called remotely by clients. Will raise if the worker has not yet been
+    initialised (i.e. before `main()` sets up the RPC server).
+    """
+    global _GLOBAL_WORKER_RREF  # noqa: PLW0603
+    if _GLOBAL_WORKER_RREF is None:
+        # Lazily create the RRef if RPC has been initialised but the variable
+        # was not yet populated (possible race between init and first call).
+        if _GLOBAL_WORKER is None:
+            raise RuntimeError("RemoteWorker instance not created on this node")
+        _GLOBAL_WORKER_RREF = rpc.RRef(_GLOBAL_WORKER)
+    return _GLOBAL_WORKER_RREF
+
+
+# Ensure this module is discoverable under the name 'rpc_server' even when executed
+# as a script (i.e., module name is '__main__'). This allows remote peers that
+# import by name to resolve the same module instance.
+if __name__ != "rpc_server":
+    sys.modules["rpc_server"] = sys.modules[__name__]
 
 
 if __name__ == "__main__":
