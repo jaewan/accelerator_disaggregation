@@ -226,6 +226,31 @@ def get_worker_rref():  # noqa: D401
     return _GLOBAL_WORKER_RREF
 
 
+def run_stateless_forward(state_dict: Dict[str, torch.Tensor], input_ids: torch.Tensor, kv_cache: Any | None = None):
+    """RPC wrapper to call stateless forward on the global worker and return outputs."""
+    if _GLOBAL_WORKER is None:
+        raise RuntimeError("Worker not initialised")
+    return _GLOBAL_WORKER.run_stateless_forward_remote(state_dict, input_ids, kv_cache)
+
+
+def load_weights(state_dict: Dict[str, torch.Tensor]):
+    if _GLOBAL_WORKER is None:
+        raise RuntimeError("Worker not initialised")
+    _GLOBAL_WORKER.load_weights_remote(state_dict)
+
+
+def run_prefill(token_ids: torch.Tensor):
+    if _GLOBAL_WORKER is None:
+        raise RuntimeError("Worker not initialised")
+    return _GLOBAL_WORKER.run_prefill_remote(token_ids)
+
+
+def run_decode_step(token_id: torch.Tensor, kv_cache_id: str):
+    if _GLOBAL_WORKER is None:
+        raise RuntimeError("Worker not initialised")
+    return _GLOBAL_WORKER.run_decode_step_remote(token_id, kv_cache_id)
+
+
 # Ensure this module is discoverable under the name 'rpc_server' even when executed
 # as a script (i.e., module name is '__main__'). This allows remote peers that
 # import by name to resolve the same module instance.
