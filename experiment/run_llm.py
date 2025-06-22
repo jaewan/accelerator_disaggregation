@@ -139,8 +139,8 @@ def _run_naive_remote(args):
     # Initialize RPC.
     _init_rpc_for_client(args)
 
-    # Obtain RemoteWorker RRef.
-    import rpc_server  # local module path; provides get_worker_rref on server
+    # Obtain RemoteWorker RRef (function is looked up on the *remote* module).
+    import rpc_server  # noqa: WPS433
 
     worker_rref = rpc.rpc_sync("GPU_WORKER", rpc_server.get_worker_rref, args=())
     LOGGER.info("Acquired RemoteWorker RRef.")
@@ -170,7 +170,7 @@ def _run_sys_simulated(args):
     LOGGER.info("Running SYS_SIMULATED mode, phase=%s", args.phase)
 
     _init_rpc_for_client(args)
-    import rpc_server
+    import rpc_server  # noqa: WPS433
 
     worker_rref = rpc.rpc_sync("GPU_WORKER", rpc_server.get_worker_rref, args=())
 
