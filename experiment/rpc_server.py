@@ -30,7 +30,7 @@ LOGGER = logging.getLogger(__name__)
 
 # Global references populated on the server node after initialisation
 _GLOBAL_WORKER: RemoteWorker | None = None  # type: ignore
-_GLOBAL_WORKER_RREF: rpc.RRef | None = None  # type: ignore
+
 
 # --------------------------------------------------------------------------------------
 # Remote worker implementation
@@ -151,7 +151,7 @@ def _parse_args(argv: List[str] | None = None):
     parser.add_argument("--master_addr", default="127.0.0.1", help="RPC master address")
     parser.add_argument("--master_port", default="29500", help="RPC master port")
     parser.add_argument("--rank", type=int, default=0)
-    parser.add_argument("--world_size", type=int, default=1)
+    parser.add_argument("--world_size", type=int, default=2, help="Total number of RPC workers (usually 2: client + server)")
     parser.add_argument("--backend", choices=["gloo", "nccl"], default="gloo")
     return parser.parse_args(argv)
 
@@ -175,7 +175,7 @@ def main(argv: List[str] | None = None):
     )
 
     # Create the global worker instance before RPC init so that other threads can access.
-    global _GLOBAL_WORKER, _GLOBAL_WORKER_RREF  # noqa: PLW0603
+    global _GLOBAL_WORKER  # noqa: PLW0603
     _GLOBAL_WORKER = RemoteWorker(model_name=args.model)
 
     rpc.init_rpc(
@@ -186,9 +186,6 @@ def main(argv: List[str] | None = None):
             num_worker_threads=16, rpc_timeout=300
         ),
     )
-
-    # Now that RPC is ready, create RRef and expose getter.
-    _GLOBAL_WORKER_RREF = rpc.RRef(_GLOBAL_WORKER)
 
     # Keep process alive until interrupted.
     def _safe_rpc_shutdown():
@@ -217,46 +214,11 @@ def main(argv: List[str] | None = None):
         _safe_rpc_shutdown()
         LOGGER.info("RPC server shut down.")
 
-
-def get_worker_rref():  # noqa: D401
-    """Return an RRef to the singleton RemoteWorker.
-
-    Called remotely by clients. Will raise if the worker has not yet been
-    initialised (i.e. before `main()` sets up the RPC server).
-    """
-    global _GLOBAL_WORKER_RREF  # noqa: PLW0603
-    if _GLOBAL_WORKER_RREF is None:
-        # Lazily create the RRef if RPC has been initialised but the variable
-        # was not yet populated (possible race between init and first call).
-        if _GLOBAL_WORKER is None:
-            raise RuntimeError("RemoteWorker instance not created on this node")
-        _GLOBAL_WORKER_RREF = rpc.RRef(_GLOBAL_WORKER)
-    return _GLOBAL_WORKER_RREF
-
-
-def run_stateless_forward(state_dict: Dict[str, torch.Tensor], input_ids: torch.Tensor, kv_cache: Any | None = None):
-    """RPC wrapper to call stateless forward on the global worker and return outputs."""
+def get_worker_rref():
+    """Return an RRef to the singleton RemoteWorker."""
     if _GLOBAL_WORKER is None:
-        raise RuntimeError("Worker not initialised")
-    return _GLOBAL_WORKER.run_stateless_forward_remote(state_dict, input_ids, kv_cache)
-
-
-def load_weights(state_dict: Dict[str, torch.Tensor]):
-    if _GLOBAL_WORKER is None:
-        raise RuntimeError("Worker not initialised")
-    _GLOBAL_WORKER.load_weights_remote(state_dict)
-
-
-def run_prefill(token_ids: torch.Tensor):
-    if _GLOBAL_WORKER is None:
-        raise RuntimeError("Worker not initialised")
-    return _GLOBAL_WORKER.run_prefill_remote(token_ids)
-
-
-def run_decode_step(token_id: torch.Tensor, kv_cache_id: str):
-    if _GLOBAL_WORKER is None:
-        raise RuntimeError("Worker not initialised")
-    return _GLOBAL_WORKER.run_decode_step_remote(token_id, kv_cache_id)
+        raise RuntimeError("RemoteWorker instance not created on this node")
+    return rpc.RRef(_GLOBAL_WORKER)
 
 
 # Ensure this module is discoverable under the name 'rpc_server' even when executed
@@ -267,4 +229,4 @@ if __name__ != "rpc_server":
 
 
 if __name__ == "__main__":
-    main() 
+    main()

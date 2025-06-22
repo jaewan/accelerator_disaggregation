@@ -157,7 +157,8 @@ def _run_naive_remote(args):
     # Obtain RemoteWorker RRef (function is looked up on the *remote* module).
     import rpc_server  # noqa: WPS433
 
-    LOGGER.info("Connected to GPU_WORKER; using wrapper RPC functions.")
+    worker_rref = rpc.rpc_sync("GPU_WORKER", rpc_server.get_worker_rref)
+    LOGGER.info("Connected to GPU_WORKER; using RRef for RPC.")
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     model = AutoModelForCausalLM.from_pretrained(args.model)
@@ -166,13 +167,13 @@ def _run_naive_remote(args):
     input_ids = tokenizer(args.prompt, return_tensors="pt").input_ids
 
     if args.phase == "prefill":
-        logits, _ = rpc.rpc_sync("GPU_WORKER", rpc_server.run_stateless_forward, args=(state_dict, input_ids))
+        logits, _ = worker_rref.rpc_sync().run_stateless_forward_remote(state_dict, input_ids)
         LOGGER.info("Remote prefill logits shape %s", logits.shape)
     else:
-        logits, kv_cache = rpc.rpc_sync("GPU_WORKER", rpc_server.run_stateless_forward, args=(state_dict, input_ids))
+        logits, kv_cache = worker_rref.rpc_sync().run_stateless_forward_remote(state_dict, input_ids)
         for step in range(5):
             next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
-            logits, kv_cache = rpc.rpc_sync("GPU_WORKER", rpc_server.run_stateless_forward, args=(state_dict, next_token, kv_cache))
+            logits, kv_cache = worker_rref.rpc_sync().run_stateless_forward_remote(state_dict, next_token, kv_cache)
         LOGGER.info("Remote decode complete; final logits shape %s", logits.shape)
 
     _shutdown_rpc()
@@ -184,24 +185,27 @@ def _run_sys_simulated(args):
     _init_rpc_for_client(args)
     import rpc_server  # noqa: WPS433
 
+    worker_rref = rpc.rpc_sync("GPU_WORKER", rpc_server.get_worker_rref)
+    LOGGER.info("Connected to GPU_WORKER; using RRef for RPC.")
+
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     model = AutoModelForCausalLM.from_pretrained(args.model)
     state_dict = model.state_dict()
 
     LOGGER.info("Connected to GPU_WORKER for sys_simulated mode (loading weights once).")
     # Load weights on the remote worker exactly once.
-    rpc.rpc_sync("GPU_WORKER", rpc_server.load_weights, args=(state_dict,))
+    worker_rref.rpc_sync().load_weights_remote(state_dict)
 
     input_ids = tokenizer(args.prompt, return_tensors="pt").input_ids
 
     if args.phase == "prefill":
-        logits, kv_id = rpc.rpc_sync("GPU_WORKER", rpc_server.run_prefill, args=(input_ids,))
+        logits, kv_id = worker_rref.rpc_sync().run_prefill_remote(input_ids)
         LOGGER.info("SYS_SIM prefill logits %s, kv_id %s", logits.shape, kv_id)
     else:
-        logits, kv_id = rpc.rpc_sync("GPU_WORKER", rpc_server.run_prefill, args=(input_ids,))
+        logits, kv_id = worker_rref.rpc_sync().run_prefill_remote(input_ids)
         for step in range(5):
             next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
-            logits, kv_id = rpc.rpc_sync("GPU_WORKER", rpc_server.run_decode_step, args=(next_token, kv_id))
+            logits, kv_id = worker_rref.rpc_sync().run_decode_step_remote(next_token, kv_id)
         LOGGER.info("SYS_SIM decode complete; final logits shape %s", logits.shape)
 
     _shutdown_rpc()
@@ -226,4 +230,4 @@ def main(argv: List[str] | None = None):
 
 
 if __name__ == "__main__":
-    main() 
+    main()
