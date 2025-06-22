@@ -1,0 +1,6 @@
+artefacts/
+server_stdout.log
+*.csv
+__pycache__/
+*.pyc
+venv/
