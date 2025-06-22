@@ -87,7 +87,7 @@ def _shutdown_rpc():
     """
     try:
         # This will be a no-op if RPC was never initialised in this process.
-        rpc.shutdown()
+        rpc.shutdown(graceful=False)
     except RuntimeError as exc:
         # Match the exact error string used by PyTorch to indicate the agent is
         # not set up. If a different error bubbles up, re-raise so we do not
