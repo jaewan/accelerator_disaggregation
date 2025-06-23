@@ -1,0 +1,19 @@
+
+\begin{table}[t]
+\centering
+\caption{Experimental Results: Semantic Translation Gap Analysis}
+\label{tab:results}
+\begin{tabular}{lcccc}
+\toprule
+\textbf{Mode} & \textbf{Phase} & \textbf{Latency (s)} & \textbf{Network (GB)} & \textbf{Gap Ratio} \\
+\midrule
+Local & Prefill & 10.74 ± 4.73 & 0.00 & — \\
+Naïve-Remote & Prefill & 9.82 ± 0.11 & 3.12 & — \\
+Semantic-Aware & Prefill & 10.14 ± 0.72 & 3.12 & — \\
+\midrule
+Local & Decode & 10.93 ± 4.95 & 0.00 & — \\
+Naïve-Remote & Decode & 12.93 ± 1.02 & 18.76 & — \\
+Semantic-Aware & Decode & 10.32 ± 0.71 & 3.12 & 6.0× \\
+\bottomrule
+\end{tabular}
+\end{table}
