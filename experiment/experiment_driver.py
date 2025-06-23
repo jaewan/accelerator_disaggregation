@@ -250,11 +250,6 @@ def shlex_join(tokens: List[str]) -> str:  # fallback for Python<3.8
 def run_experiment(args):
     results: List[Dict[str, Any]] = []
 
-    if not args.external_server:
-        server = _start_rpc_server(args.model, args.gpu_host, args.master_port)
-    else:
-        server = None
-
     try:
         for trial in range(1, args.trials + 1):
             for phase in ("prefill", "decode"):
@@ -266,32 +261,45 @@ def run_experiment(args):
                     artefact_prefix.parent.mkdir(parents=True, exist_ok=True)
                     dmon_csv = artefact_prefix.with_suffix(".csv")
 
-                    # Start GPU monitoring only (no more tcpdump)
-                    dmon_proc = _start_dmon(dmon_csv)
+                    # Start RPC server for remote modes only
+                    server = None
+                    if mode != "local" and not args.external_server:
+                        server = _start_rpc_server(args.model, args.gpu_host, args.master_port)
 
-                    # Run client and measure latency + network bytes
-                    start_ts = time.time()
-                    latency_sec, net_bytes = _run_client(mode, phase, args)
-                    run_wall = time.time() - start_ts
+                    try:
+                        # Start GPU monitoring
+                        dmon_proc = _start_dmon(dmon_csv)
 
-                    # Stop GPU monitoring
-                    dmon_proc.terminate()
+                        # Run client and measure latency + network bytes
+                        start_ts = time.time()
+                        latency_sec, net_bytes = _run_client(mode, phase, args)
+                        run_wall = time.time() - start_ts
 
-                    # Collect GPU utilization
-                    avg_sm = _average_sm_util(dmon_csv)
+                        # Stop GPU monitoring
+                        dmon_proc.terminate()
 
-                    results.append({
-                        "trial": trial,
-                        "phase": phase,
-                        "mode": mode,
-                        "latency_s": latency_sec,
-                        "wall_s": run_wall,
-                        "net_bytes": net_bytes,
-                        "avg_sm": avg_sm,
-                    })
-    finally:
-        if server is not None:
-            server.terminate()
+                        # Collect GPU utilization
+                        avg_sm = _average_sm_util(dmon_csv)
+
+                        results.append({
+                            "trial": trial,
+                            "phase": phase,
+                            "mode": mode,
+                            "latency_s": latency_sec,
+                            "wall_s": run_wall,
+                            "net_bytes": net_bytes,
+                            "avg_sm": avg_sm,
+                        })
+                    finally:
+                        # Clean up server for this run
+                        if server is not None:
+                            server.terminate()
+                            # Wait a moment for clean shutdown
+                            time.sleep(2)
+
+    except Exception as e:
+        print(f"Experiment failed: {e}", file=sys.stderr)
+        raise
 
     # Write output CSV
     fieldnames = ["trial", "phase", "mode", "latency_s", "wall_s", "net_bytes", "avg_sm"]

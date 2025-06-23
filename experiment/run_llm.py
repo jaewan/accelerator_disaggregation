@@ -63,17 +63,26 @@ def _parse_args(argv: List[str] | None = None):
 def _measure_tensor_bytes(*objects) -> int:
     """Calculate total bytes for tensors/objects being sent over RPC."""
     total_bytes = 0
-    for obj in objects:
+    
+    def _measure_single_object(obj) -> int:
+        """Recursively measure a single object."""
         if obj is None:
-            continue
+            return 0
         elif hasattr(obj, 'nbytes'):  # torch.Tensor
-            total_bytes += obj.nbytes
+            return obj.nbytes
         elif isinstance(obj, dict):  # state_dict
-            total_bytes += sum(v.nbytes for v in obj.values() if hasattr(v, 'nbytes'))
+            return sum(_measure_single_object(v) for v in obj.values())
         elif isinstance(obj, (list, tuple)):  # KV cache or nested structures
-            total_bytes += _measure_tensor_bytes(*obj)
+            return sum(_measure_single_object(item) for item in obj)
         elif isinstance(obj, str):  # KV cache IDs
-            total_bytes += len(obj.encode('utf-8'))
+            return len(obj.encode('utf-8'))
+        else:
+            # For other types (int, float, etc.), assume negligible size
+            return 0
+    
+    for obj in objects:
+        total_bytes += _measure_single_object(obj)
+    
     return total_bytes
 
 
