@@ -45,7 +45,7 @@ LOGGER = logging.getLogger(__name__)
 
 def _parse_args(argv: List[str] | None = None):
     parser = argparse.ArgumentParser(description="Client orchestrator for LLM experiments")
-    parser.add_argument("--mode", required=True, choices=["local", "naive", "sys_simulated"])
+    parser.add_argument("--mode", required=True, choices=["local", "naive", "sys_simulated", "remote_cache"])
     parser.add_argument("--phase", required=True, choices=["prefill", "decode"])
     parser.add_argument("--model", default="sshleifer/tiny-gpt2", help="HF model name or path")
     parser.add_argument("--prompt", default="Hello, my dog is cute and", help="Prompt text")
@@ -323,6 +323,57 @@ def _run_sys_simulated(args):
     print(f"NETWORK_BYTES: {metrics.total_bytes}")
 
 
+def _run_remote_cache(args):
+    LOGGER.info("Running REMOTE_CACHE mode, phase=%s", args.phase)
+    metrics = NetworkMetrics()
+
+    _init_rpc_for_client(args)
+    import rpc_server  # noqa: WPS433
+
+    LOGGER.info("Connected to GPU_WORKER for remote_cache mode.")
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    model = AutoModelForCausalLM.from_pretrained(args.model)
+    state_dict = model.state_dict()
+
+    # Load weights on the remote worker exactly once.
+    bytes_sent = _measure_tensor_bytes(state_dict)
+    metrics.bytes_sent += bytes_sent
+    rpc.rpc_sync("GPU_WORKER", rpc_server.load_weights, args=(state_dict,))
+
+    input_ids = tokenizer(args.prompt, return_tensors="pt").input_ids
+
+    if args.phase == "prefill":
+        # Only send input_ids (weights already loaded)
+        bytes_sent = _measure_tensor_bytes(input_ids)
+        metrics.bytes_sent += bytes_sent
+        logits, kv_cache = rpc.rpc_sync("GPU_WORKER", rpc_server.run_prefill, args=(input_ids,))
+        bytes_received = _measure_tensor_bytes(logits, kv_cache)
+        metrics.bytes_received += bytes_received
+        LOGGER.info("REMOTE_CACHE prefill logits %s, kv_cache type %s", logits.shape, type(kv_cache))
+    else:
+        # Initial prefill
+        bytes_sent = _measure_tensor_bytes(input_ids)
+        metrics.bytes_sent += bytes_sent
+        logits, kv_cache = rpc.rpc_sync("GPU_WORKER", rpc_server.run_prefill, args=(input_ids,))
+        bytes_received = _measure_tensor_bytes(logits, kv_cache)
+        metrics.bytes_received += bytes_received
+        # Decode steps - send new token + full KV cache each time
+        for step in range(5):
+            next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
+            bytes_sent = _measure_tensor_bytes(next_token, kv_cache)
+            metrics.bytes_sent += bytes_sent
+            logits, kv_cache = rpc.rpc_sync(
+                "GPU_WORKER", rpc_server.run_decode_step, args=(next_token, kv_cache)
+            )
+            bytes_received = _measure_tensor_bytes(logits, kv_cache)
+            metrics.bytes_received += bytes_received
+        LOGGER.info("REMOTE_CACHE decode complete; final logits shape %s", logits.shape)
+
+    _shutdown_rpc()
+    print(f"NETWORK_BYTES: {metrics.total_bytes}")
+
+
 # --------------------------------------------------------------------------------------
 # Entry point
 # --------------------------------------------------------------------------------------
@@ -336,6 +387,8 @@ def main(argv: List[str] | None = None):
         _run_naive_remote(args)
     elif args.mode == "sys_simulated":
         _run_sys_simulated(args)
+    elif args.mode == "remote_cache":
+        _run_remote_cache(args)
     else:
         LOGGER.error("Unknown mode %s", args.mode)
         sys.exit(1)

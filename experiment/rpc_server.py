@@ -52,13 +52,19 @@ class RemoteWorker:
 
         # Create an *empty* model skeleton first so we can load weights later.
         config = AutoConfig.from_pretrained(model_name)
-        self.model = AutoModelForCausalLM.from_config(config).to(self.device)
-
-        # Torch dtype handling
-        if dtype == "float16" and self.device.type == "cuda":
-            self.model = self.model.half()
-        elif dtype == "bfloat16" and self.device.type == "cuda":
-            self.model = self.model.to(dtype=torch.bfloat16)
+        
+        # Create model and immediately move to device with appropriate dtype
+        with torch.no_grad():  # Disable gradient computation during initialization
+            self.model = AutoModelForCausalLM.from_config(config)
+            
+            # Convert to half precision immediately for large models to save memory
+            if dtype == "float16" and device == "cuda":
+                self.model = self.model.half()
+            elif dtype == "bfloat16" and device == "cuda":
+                self.model = self.model.to(dtype=torch.bfloat16)
+                
+            # Move to device after dtype conversion
+            self.model = self.model.to(self.device)
 
         # Internal bookkeeping for semantic-aware mode
         self.weights_loaded: bool = False

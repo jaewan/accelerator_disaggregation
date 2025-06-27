@@ -95,7 +95,7 @@ def _start_rpc_server(model: str, master_addr: str, master_port: str) -> Process
     # Wait for server to be ready instead of using a fixed sleep.
     handle = ProcessHandle(popen)
     try:
-        for _ in range(15):  # Wait up to 15 seconds
+        for _ in range(30):  # Wait up to 30 seconds for large models
             if popen.poll() is not None:
                 # Print last 20 lines of server log for debugging
                 if log_path.exists():
@@ -250,11 +250,18 @@ def shlex_join(tokens: List[str]) -> str:  # fallback for Python<3.8
 def run_experiment(args):
     results: List[Dict[str, Any]] = []
 
+    MODES = [
+        ("local", "Local (Baseline)"),
+        ("naive", "Semantic-Blind (Naive)"),
+        ("remote_cache", "Semantic-Blind + Remote Cache"),
+        ("sys_simulated", "Framework-Level (sys)")
+    ]
+
     try:
         for trial in range(1, args.trials + 1):
             for phase in ("prefill", "decode"):
-                for mode in ("local", "naive", "sys_simulated"):
-                    print(f"Trial {trial} – {mode.upper()} {phase}…", flush=True)
+                for mode, mode_label in MODES:
+                    print(f"Trial {trial} – {mode_label} {phase}…", flush=True)
 
                     # Paths for artefacts
                     artefact_prefix = Path(args.output_dir) / f"{mode}_{phase}_trial{trial}"
@@ -284,7 +291,7 @@ def run_experiment(args):
                         results.append({
                             "trial": trial,
                             "phase": phase,
-                            "mode": mode,
+                            "mode": mode_label,
                             "latency_s": latency_sec,
                             "wall_s": run_wall,
                             "net_bytes": net_bytes,
