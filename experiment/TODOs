@@ -1,0 +1,30 @@
+1 Instrumentation & measurement
+1.1 Add a helper in rpc_server.py that returns rpc.get_rpc_agent().get_metrics()['sent_bytes'] and ['received_bytes']; expose it via an RPC function get_network_counters().
+1.2 In run_llm.py, before the first RPC call record baseline counters, after the phase record final counters, and compute true bytes transferred (store in variable net_bytes). Remove use of _get_compressed_size.
+1.3 Capture encode-/decode-compression time in sys_simulated by timing the compression / decompression helpers; accumulate and print COMPRESS_MS per run.
+2 Compression path correctness
+2.1 Replace the current “simulate compression” stubs with real logic:
+ • Serialize tensors to NumPy → zlib.compress.
+ • On server, zlib.decompress → torch.from_numpy.
+2.2 Update the client to transmit the compressed bytes object, not the raw tensor.
+3 Baseline fixes
+3.1 In run_remote_cache count the weight upload once and remove the double-count.
+3.2 Ensure KV cache truly stays GPU-resident between steps (run_decode_with_handle already respects this).
+4 Driver updates (experiment_driver.py)
+4.1 Call the new get_network_counters() at the end of each client run instead of parsing NETWORK_BYTES lines.
+4.2 Increase trials default from 3 to 5 and compute mean ± CI (you may create analyse_results.py).
+5 Robust GPU-util sampling
+5.1 Start nvidia-smi dmon before launching the client and sleep 0.5 s to guarantee at least one sample.
+5.2 If the CSV has < 2 data rows, warn and rerun that trial automatically.
+6 Statistical analysis script (analyse_results.py)
+6.1 Read the CSV, group by (mode, phase), compute mean, std, and 95 % CI.
+6.2 Run paired t-tests comparing (3) vs (4); write a markdown report and save plots.
+7 Documentation
+7.1 Update the project README with instructions to run a single trial locally and to reproduce the full experiment.
+7.2 Add notes on hardware, software versions, and how to extend to multi-node.
+8 Validation checklist
+8.1 Run one local “sys_simulated decode” and verify:
+ • Reported bytes ≈ compressed payload size.
+ • COMPRESS_MS non-zero.
+8.2 Smoke-test all four modes for both phases.
+8.3 Commit results/plots for a sample run to ensure the analysis pipeline works.

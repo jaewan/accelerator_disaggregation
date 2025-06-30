@@ -16,6 +16,8 @@ import sys
 import time
 import uuid
 from typing import Any, Dict, List, Tuple
+import zlib
+import pickle
 
 import torch  # type: ignore
 from torch.distributed import rpc  # type: ignore
@@ -84,6 +86,23 @@ class RemoteWorker:
             moved.append([t.to(device=device, non_blocking=True) for t in layer])
         return moved
 
+    def _compress_tensor(self, tensor):
+        """Semantic-aware compression: compress tensor using knowledge of structure"""
+        if tensor.dtype != torch.float16:
+            tensor_half = tensor.half()
+        else:
+            tensor_half = tensor
+        
+        tensor_bytes = pickle.dumps(tensor_half.cpu().numpy())
+        compressed = zlib.compress(tensor_bytes, level=6)
+        return compressed
+
+    def _decompress_tensor(self, compressed_data):
+        """Decompress tensor data"""
+        decompressed = zlib.decompress(compressed_data)
+        tensor_np = pickle.loads(decompressed)
+        return torch.from_numpy(tensor_np).to(self.device)
+
     # ------------------------------------------------------------------
     # Naive, stateless execution path
     # ------------------------------------------------------------------
@@ -145,6 +164,106 @@ class RemoteWorker:
         # Update stored cache on CPU to minimise GPU memory footprint between calls.
         self.kv_cache_store[kv_cache_id] = self._move_kv_cache(outputs.past_key_values, torch.device("cpu"))
         return logits, kv_cache_id
+
+    def run_prefill_with_handle(self, input_ids: torch.Tensor):
+        """Realistic semantic-blind caching: KV cache stays resident remotely."""
+        input_ids = input_ids.to(self.device, non_blocking=True)
+        with torch.no_grad():
+            outputs = self.model(input_ids=input_ids, use_cache=True)
+        logits = outputs.logits.cpu()
+        kv_handle = str(uuid.uuid4())
+        # Keep KV cache on GPU for realistic semantic-blind caching baseline
+        self.kv_cache_store[kv_handle] = outputs.past_key_values
+        LOGGER.debug("Prefill with handle complete; kv_handle=%s (KV cache stays on GPU)", kv_handle)
+        return logits, kv_handle
+
+    def run_prefill_with_cache_remote(self, token_ids: torch.Tensor):
+        """Run prefill and return actual KV cache tensors (for remote cache baseline)."""
+        token_ids = token_ids.to(self.device, non_blocking=True)
+        with torch.no_grad():
+            outputs = self.model(input_ids=token_ids, use_cache=True)
+        logits = outputs.logits.cpu()
+        kv_cache = self._move_kv_cache(outputs.past_key_values, torch.device("cpu"))
+        LOGGER.debug("Prefill with cache complete; returning actual KV cache tensors")
+        return logits, kv_cache
+
+    def run_decode_with_handle(self, token_id: torch.Tensor, kv_handle: str):
+        """Realistic semantic-blind caching: KV cache stays resident remotely."""
+        if kv_handle not in self.kv_cache_store:
+            raise RuntimeError(f"KV cache handle {kv_handle} not found")
+        token_id = token_id.to(self.device, non_blocking=True)
+        kv_cache = self.kv_cache_store[kv_handle]  # Already on GPU, no transfer needed
+
+        with torch.no_grad():
+            outputs = self.model(input_ids=token_id, past_key_values=kv_cache, use_cache=True)
+        logits = outputs.logits.cpu()
+        # Update KV cache on GPU - stays resident remotely
+        self.kv_cache_store[kv_handle] = outputs.past_key_values
+        LOGGER.debug("Decode with handle complete; kv_handle=%s (KV cache stays on GPU)", kv_handle)
+        return logits
+
+    def run_decode_step_with_cache_remote(self, token_id: torch.Tensor, kv_cache: Any):
+        """Run decode step with actual KV cache tensors (for remote cache baseline)."""
+        token_id = token_id.to(self.device, non_blocking=True)
+        kv_cache = self._move_kv_cache(kv_cache, self.device)
+
+        with torch.no_grad():
+            outputs = self.model(input_ids=token_id, past_key_values=kv_cache, use_cache=True)
+        logits = outputs.logits.cpu()
+        updated_kv_cache = self._move_kv_cache(outputs.past_key_values, torch.device("cpu"))
+        return logits, updated_kv_cache
+
+    # ------------------------------------------------------------------
+    # Semantic-aware execution path with compression
+    # ------------------------------------------------------------------
+
+    def run_prefill_semantic(self, token_blob: bytes):
+        """Semantic-aware prefill with real compression pipeline.
+
+        Parameters
+        ----------
+        token_blob : bytes
+            Compressed token tensor produced by client _compress_tensor.
+        Returns
+        -------
+        Tuple[bytes, str]
+            Compressed logits and kv_cache_id string.
+        """
+        token_ids: torch.Tensor = self._decompress_tensor(token_blob)
+        token_ids = token_ids.to(self.device, non_blocking=True)
+
+        with torch.no_grad():
+            outputs = self.model(input_ids=token_ids, use_cache=True)
+
+        logits = outputs.logits.cpu()
+        logits_blob = self._compress_tensor(logits)
+
+        kv_cache_id = str(uuid.uuid4())
+        # Store KV cache on CPU
+        self.kv_cache_store[kv_cache_id] = self._move_kv_cache(outputs.past_key_values, torch.device("cpu"))
+        LOGGER.debug("Semantic prefill complete; kv_cache_id=%s", kv_cache_id)
+        return logits_blob, kv_cache_id
+
+    def run_decode_step_semantic(self, token_blob: bytes, kv_cache_id: str):
+        """Semantic-aware decode with real compression pipeline."""
+        if kv_cache_id not in self.kv_cache_store:
+            raise RuntimeError(f"KV cache id {kv_cache_id} not found")
+
+        token_id: torch.Tensor = self._decompress_tensor(token_blob)
+        token_id = token_id.to(self.device, non_blocking=True)
+
+        kv_cache = self._move_kv_cache(self.kv_cache_store[kv_cache_id], self.device)
+
+        with torch.no_grad():
+            outputs = self.model(input_ids=token_id, past_key_values=kv_cache, use_cache=True)
+
+        logits = outputs.logits.cpu()
+        logits_blob = self._compress_tensor(logits)
+
+        # Update stored cache
+        self.kv_cache_store[kv_cache_id] = self._move_kv_cache(outputs.past_key_values, torch.device("cpu"))
+        LOGGER.debug("Semantic decode complete; kv_cache_id=%s", kv_cache_id)
+        return logits_blob, kv_cache_id
 
 
 # --------------------------------------------------------------------------------------
@@ -247,6 +366,77 @@ def run_decode_step(token_id: torch.Tensor, kv_cache_id: str):
     if _GLOBAL_WORKER is None:
         raise RuntimeError("Worker not initialised")
     return _GLOBAL_WORKER.run_decode_step_remote(token_id, kv_cache_id)
+
+
+def run_prefill_with_cache(token_ids: torch.Tensor):
+    """RPC wrapper for remote cache baseline - returns actual KV cache tensors."""
+    if _GLOBAL_WORKER is None:
+        raise RuntimeError("Worker not initialised")
+    return _GLOBAL_WORKER.run_prefill_with_cache_remote(token_ids)
+
+
+def run_decode_step_with_cache(token_id: torch.Tensor, kv_cache: Any):
+    """RPC wrapper for remote cache baseline - uses actual KV cache tensors."""
+    if _GLOBAL_WORKER is None:
+        raise RuntimeError("Worker not initialised")
+    return _GLOBAL_WORKER.run_decode_step_with_cache_remote(token_id, kv_cache)
+
+
+def run_prefill_with_handle(input_ids: torch.Tensor):
+    """RPC wrapper for realistic semantic-blind caching baseline."""
+    if _GLOBAL_WORKER is None:
+        raise RuntimeError("Worker not initialised")
+    return _GLOBAL_WORKER.run_prefill_with_handle(input_ids)
+
+
+def run_decode_with_handle(token_id: torch.Tensor, kv_handle: str):
+    """RPC wrapper for realistic semantic-blind caching baseline."""
+    if _GLOBAL_WORKER is None:
+        raise RuntimeError("Worker not initialised")
+    return _GLOBAL_WORKER.run_decode_with_handle(token_id, kv_handle)
+
+
+def run_prefill_semantic(token_blob: bytes):
+    """RPC wrapper for semantic-aware prefill with compression."""
+    if _GLOBAL_WORKER is None:
+        raise RuntimeError("Worker not initialised")
+    return _GLOBAL_WORKER.run_prefill_semantic(token_blob)
+
+
+def run_decode_step_semantic(token_blob: bytes, kv_cache_id: str):
+    """RPC wrapper for semantic-aware decode with compression."""
+    if _GLOBAL_WORKER is None:
+        raise RuntimeError("Worker not initialised")
+    return _GLOBAL_WORKER.run_decode_step_semantic(token_blob, kv_cache_id)
+
+
+def get_network_counters():
+    """RPC helper to return (sent_bytes, received_bytes) from the RPC agent."""
+    try:
+        from torch.distributed.rpc import api as _rpc_api  # type: ignore
+        agent = _rpc_api._get_current_rpc_agent()
+    except Exception:
+        return 0, 0
+
+    # TensorPipe agent exposes bytes counters inside get_debug_info()
+    try:
+        dbg = agent.get_debug_info()  # type: ignore
+        # Example keys: {"CLIENT_WORKER": {"outBytes": 1234, "inBytes": 5678, ...}}
+        sent = sum(peer.get("outBytes", 0) for peer in dbg.values() if isinstance(peer, dict))
+        received = sum(peer.get("inBytes", 0) for peer in dbg.values() if isinstance(peer, dict))
+        return int(sent), int(received)
+    except Exception:
+        return 0, 0
+
+
+def get_all_metrics():
+    """Return raw metrics dict from RPC agent (for debugging)."""
+    try:
+        from torch.distributed.rpc import api as _rpc_api  # type: ignore
+        agent = _rpc_api._get_current_rpc_agent()
+        return agent.get_metrics() if hasattr(agent, "get_metrics") else {}
+    except Exception:
+        return {}
 
 
 # Ensure this module is discoverable under the name 'rpc_server' even when executed

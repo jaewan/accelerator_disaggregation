@@ -95,7 +95,7 @@ def _start_rpc_server(model: str, master_addr: str, master_port: str) -> Process
     # Wait for server to be ready instead of using a fixed sleep.
     handle = ProcessHandle(popen)
     try:
-        for _ in range(30):  # Wait up to 30 seconds for large models
+        for _ in range(1800):  # Wait up to 30 minutes for large model downloads
             if popen.poll() is not None:
                 # Print last 20 lines of server log for debugging
                 if log_path.exists():
@@ -243,6 +243,23 @@ def shlex_join(tokens: List[str]) -> str:  # fallback for Python<3.8
 
 
 # --------------------------------------------------------------------------------------
+# Extra helper for robust GPU-util sampling (Step 5.2)
+# --------------------------------------------------------------------------------------
+
+
+def _csv_data_rows(path: Path) -> int:
+    """Return number of non-comment, non-empty rows in a CSV file."""
+    if not path.is_file():
+        return 0
+    cnt = 0
+    for line in path.read_text().splitlines():
+        if not line or line.startswith("#"):
+            continue
+        cnt += 1
+    return cnt
+
+
+# --------------------------------------------------------------------------------------
 # Driver main
 # --------------------------------------------------------------------------------------
 
@@ -253,8 +270,8 @@ def run_experiment(args):
     MODES = [
         ("local", "Local (Baseline)"),
         ("naive", "Semantic-Blind (Naive)"),
-        ("remote_cache", "Semantic-Blind + Remote Cache"),
-        ("sys_simulated", "Framework-Level (sys)")
+        ("remote_cache", "Semantic-Blind + Realistic Remote Cache"),
+        ("sys_simulated", "Framework-Level Semantic-Aware (\\sys)")
     ]
 
     try:
@@ -273,36 +290,45 @@ def run_experiment(args):
                     if mode != "local" and not args.external_server:
                         server = _start_rpc_server(args.model, args.gpu_host, args.master_port)
 
-                    try:
-                        # Start GPU monitoring
-                        dmon_proc = _start_dmon(dmon_csv)
+                    for attempt in range(2):
+                        try:
+                            # Start GPU monitoring and allow it to collect at least one sample
+                            dmon_proc = _start_dmon(dmon_csv)
+                            time.sleep(0.5)
 
-                        # Run client and measure latency + network bytes
-                        start_ts = time.time()
-                        latency_sec, net_bytes = _run_client(mode, phase, args)
-                        run_wall = time.time() - start_ts
+                            # Run client and measure latency + network bytes
+                            start_ts = time.time()
+                            latency_sec, net_bytes = _run_client(mode, phase, args)
+                            run_wall = time.time() - start_ts
 
-                        # Stop GPU monitoring
-                        dmon_proc.terminate()
+                            # Stop GPU monitoring
+                            dmon_proc.terminate()
 
-                        # Collect GPU utilization
-                        avg_sm = _average_sm_util(dmon_csv)
+                            # Verify CSV has sufficient data rows; retry once if not
+                            if _csv_data_rows(dmon_csv) < 2 and attempt == 0:
+                                print(f"Warning: dmon log too short for {mode_label} {phase}; retrying…")
+                                continue  # retry the attempt
 
-                        results.append({
-                            "trial": trial,
-                            "phase": phase,
-                            "mode": mode_label,
-                            "latency_s": latency_sec,
-                            "wall_s": run_wall,
-                            "net_bytes": net_bytes,
-                            "avg_sm": avg_sm,
-                        })
-                    finally:
-                        # Clean up server for this run
-                        if server is not None:
-                            server.terminate()
-                            # Wait a moment for clean shutdown
-                            time.sleep(2)
+                            # Collect GPU utilization
+                            avg_sm = _average_sm_util(dmon_csv)
+
+                            results.append({
+                                "trial": trial,
+                                "phase": phase,
+                                "mode": mode_label,
+                                "latency_s": latency_sec,
+                                "wall_s": run_wall,
+                                "net_bytes": net_bytes,
+                                "avg_sm": avg_sm,
+                            })
+                            break  # exit retry loop on success
+                        finally:
+                            pass  # per-attempt cleanup handled after loop
+
+                    # ---- end for attempt loop ----
+                    if server is not None:
+                        server.terminate()
+                        time.sleep(2)
 
     except Exception as e:
         print(f"Experiment failed: {e}", file=sys.stderr)
@@ -324,7 +350,7 @@ def run_experiment(args):
 
 def _parse_args(argv=None):
     p = argparse.ArgumentParser(description="Semantic gap experiment driver")
-    p.add_argument("--trials", type=int, default=1)
+    p.add_argument("--trials", type=int, default=5)
     p.add_argument("--gpu_host", default="127.0.0.1")
     p.add_argument("--master_port", default="29501")
     p.add_argument("--model", default="sshleifer/tiny-gpt2")

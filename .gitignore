@@ -35,3 +35,5 @@ libtorch/
 
 # Misc
 .DS_Store
+
+experiment/venv

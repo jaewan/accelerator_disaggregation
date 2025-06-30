@@ -3,3 +3,4 @@ transformers==4.30.0
 accelerate==0.21.0
 sentencepiece
 numpy==1.26.4 
+scipy
