@@ -112,4 +112,49 @@ Add `--modes local,remote_cache,sys_simulated` to run a subset, or `--external_s
 * **Cross-request semantic batching**.
 * **Real 2-node deployment** to capture NIC/PCIe characteristics.
 
+## Possible Next Action Item
+Implement **KV-cache miss handling & delta-transfer** in \sys to expose a clearer gap versus the semantic-blind *Remote-Cache* baseline.
+
+1. **Cache-Miss Path**
+   • When a decode step arrives with `kv_id` that is not present on the current GPU (evicted or migrated), \sys should **reconstruct the cache on-demand**.
+   • Instead of shipping the *entire* cache (hundreds of MB) back to the GPU, transmit only what is missing:
+     – **Layer mask** identifying absent blocks.
+     – **Compressed deltas** for those blocks.
+
+2. **Delta-Transfer Protocol**
+   | Stage | Semantic-Blind Remote-Cache | \sys w/ Delta Transfer |
+   |-------|----------------------------|------------------------|
+   | ① Prefill | Upload full KV cache once and keep handle | Same (handle + CPU copy for diffing) |
+   | ② GPU Evicts Layer *L* | — (baseline would thrash or OOM) | Move evicted tensors to CPU, mark dirty bits |
+   | ③ Next Decode Step | Client still sends token + handle | GPU detects miss → requests only *L* |
+   | ④ Network Payload | — (none, cache still resident) | **Δ(L) ≪ full cache** |
+
+3. **Design Sketch**
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant G as GPU_Worker
+    participant H as Host_CPU
+    C->>G: token + kv_id
+    alt cache hit
+        G-->>C: logits (compressed)
+    else cache miss
+        G->>H: request Δ( kv_id )
+        H-->>G: compressed tensors for missing layers
+        G-->>C: logits (compressed)
+    end
+```
+
+4. **Why It Beats Semantic-Blind Remote-Cache**
+   • Remote-Cache assumes *all* KV tensors are GPU-resident; on an eviction it must reload **everything**, incurring the full transfer cost.
+   • \sys tracks per-layer residency + uses semantic compression, so the recovery traffic is *proportional to the miss*, not to the total cache.
+
+5. **Implementation Steps**
+   1. Extend `RemoteWorker` to maintain a **CPU-side shadow store** with dirty-bit tracking.
+   2. Add RPC methods `fetch_missing_kv_layers(kv_id, mask)` returning compressed deltas.
+   3. Update decode path to detect missing layers and issue fetch requests transparently.
+   4. Instrument `get_network_counters()` to separate *delta* vs *regular* traffic for analysis.
+
+This feature will enable experiments under **memory pressure scenarios** and should widen the measured gap between \sys and the semantic-blind baseline.
+
 ---
