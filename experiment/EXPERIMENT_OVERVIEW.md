@@ -157,4 +157,20 @@ sequenceDiagram
 
 This feature will enable experiments under **memory pressure scenarios** and should widen the measured gap between \sys and the semantic-blind baseline.
 
+## KV Cache Identifiers: `kv_handle` vs `kv_id`
+
+| Attribute | `kv_handle` (Remote-Cache) | `kv_id` (\sys) |
+|-----------|---------------------------|-----------------|
+| **Residence** | GPU memory for entire session | CPU memory by default; moved to GPU on demand |
+| **Structure Awareness** | Opaque pointer-like token | Semantic – runtime knows tensor dtype/shape |
+| **Network Traffic** | Only tokens & logits (uncompressed) | Compressed tokens/logits; KV deltas on miss |
+| **GPU-Memory Pressure** | Must keep full cache in VRAM; may OOM | Can evict cold layers, rehydrate selectively |
+| **Compression / Delta Encode** | Not possible (blob is opaque) | fp16 quant + zlib; future per-layer deltas |
+| **Analogy** | rCUDA remote pointer | Framework-managed object with metadata |
+
+> In essence, `kv_handle` says *"keep that blob right where it is; I'll just reference it."*  
+> `kv_id` says *"I understand what's inside—feel free to move, shrink, or partially reload it."*
+
+This semantic insight is what enables \sys to layer extra optimisations (compression, eviction, delta transfer) on top of the baseline caching policy.
+
 ---
