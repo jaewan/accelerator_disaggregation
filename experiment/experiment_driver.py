@@ -314,10 +314,14 @@ def run_experiment(args):
                             dmon_proc = _start_dmon(dmon_csv)
                             time.sleep(0.5)
 
+                            # Prepare per-run args with dynamic port
+                            import argparse as _ap
+                            client_args = _ap.Namespace(**vars(args))
+                            client_args.master_port = run_port
+
                             # Run client and measure latency + network bytes
                             start_ts = time.time()
-                            latency_sec, net_bytes = _run_client(mode, phase,
-                                     args._replace(master_port=run_port))
+                            latency_sec, net_bytes = _run_client(mode, phase, client_args)
                             run_wall = time.time() - start_ts
 
                             # Stop GPU monitoring
