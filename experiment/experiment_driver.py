@@ -298,10 +298,11 @@ def run_experiment(args):
                     artefact_prefix.parent.mkdir(parents=True, exist_ok=True)
                     dmon_csv = artefact_prefix.with_suffix(".csv")
 
-                    # -------- assign a unique port per mode  -----------------
-                    base      = int(args.master_port)          # e.g. 29502
-                    offsets    = {"naive": 0, "remote_cache": 1, "sys_simulated": 2}
-                    run_port   = str(base + offsets.get(mode, 0))
+                    # choose a unique port per (mode, phase) to avoid Gloo stale sockets
+                    base_port = int(args.master_port)
+                    mode_offset = {"naive": 0, "remote_cache": 10, "sys_simulated": 20}.get(mode, 30)
+                    phase_offset = 0 if phase == "prefill" else 1  # decode gets +1
+                    run_port = str(base_port + mode_offset + phase_offset)
 
                     # Start RPC server for remote modes only
                     server = None
@@ -348,7 +349,7 @@ def run_experiment(args):
                         finally:
                             pass  # per-attempt cleanup handled after loop
 
-                    # ---- end for attempt loop ----
+                    # after retry loop ensure server terminated
                     if server is not None:
                         server.terminate()
                         time.sleep(2)
