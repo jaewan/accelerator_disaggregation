@@ -307,7 +307,7 @@ def run_experiment(args):
                     # Start RPC server for remote modes only
                     server = None
                     if mode != "local" and not args.external_server:
-                        server = _start_rpc_server(args.model, args.gpu_host, args.master_port)
+                        server = _start_rpc_server(args.model, args.gpu_host, run_port)
 
                     for attempt in range(2):
                         try:
