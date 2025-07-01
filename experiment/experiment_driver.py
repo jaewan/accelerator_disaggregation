@@ -285,6 +285,11 @@ def run_experiment(args):
                     artefact_prefix.parent.mkdir(parents=True, exist_ok=True)
                     dmon_csv = artefact_prefix.with_suffix(".csv")
 
+                    # -------- assign a unique port per mode  -----------------
+                    base      = int(args.master_port)          # e.g. 29502
+                    offsets    = {"naive": 0, "remote_cache": 1, "sys_simulated": 2}
+                    run_port   = str(base + offsets.get(mode, 0))
+
                     # Start RPC server for remote modes only
                     server = None
                     if mode != "local" and not args.external_server:
@@ -298,7 +303,8 @@ def run_experiment(args):
 
                             # Run client and measure latency + network bytes
                             start_ts = time.time()
-                            latency_sec, net_bytes = _run_client(mode, phase, args)
+                            latency_sec, net_bytes = _run_client(mode, phase,
+                                     args._replace(master_port=run_port))
                             run_wall = time.time() - start_ts
 
                             # Stop GPU monitoring
