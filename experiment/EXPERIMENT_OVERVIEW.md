@@ -11,7 +11,7 @@ This repository contains an **end-to-end experiment** that quantifies those bene
 | **Local** (`local`) | Model & cache on the *same* GPU.  Upper-bound, no network. | 0 bytes |
 | **Semantic-Blind · Naïve** (`naive`) | Every step transfers: **weights + inputs + KV cache + logits**. Slow but simple sanity baseline. | `O(weights + tokens + KV)` per step |
 | **Semantic-Blind · Remote-Cache** (`remote_cache`) | 1) Weights copied *once*.<br>2) KV cache **stays on the GPU** and the client only receives an **opaque handle**.<br>3) Tokens & logits sent uncompressed. | `O(tokens + logits)` per step |
-| **Framework-Level Semantic-Aware (\sys)** (`sys_simulated`) | Same caching policy as *Remote-Cache* **plus**:<br>a) *Tensor-type aware compression* (fp16-quant + zlib).<br>b) *Delta transfers* of KV cache (future work). | ≪ `O(tokens + logits)` per step |
+| **Framework-Level Semantic-Aware (\sys)** (`sys_simulated`) | Same caching policy as *Remote-Cache* **plus**:<br>a) *Test against naiive compression vs tensor aware compression schemesTensor-type aware compression* (fp16-quant + zlib).<br>b) *Delta transfers* of KV cache (future work). | ≪ `O(tokens + logits)` per step |
 
 ### Visual Summary
 ```mermaid
