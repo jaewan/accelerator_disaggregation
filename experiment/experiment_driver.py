@@ -38,7 +38,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Sequence
 import shlex
 
 # --------------------------------------------------------------------------------------
@@ -267,12 +267,25 @@ def _csv_data_rows(path: Path) -> int:
 def run_experiment(args):
     results: List[Dict[str, Any]] = []
 
-    MODES = [
-        ("local", "Local (Baseline)"),
-        ("naive", "Semantic-Blind (Naive)"),
-        ("remote_cache", "Semantic-Blind + Realistic Remote Cache"),
-        ("sys_simulated", "Framework-Level Semantic-Aware (\\sys)")
-    ]
+    # Define all available modes once
+    MODE_DEFS: Dict[str, str] = {
+        "local": "Local (Baseline)",
+        "naive": "Semantic-Blind (Naive)",
+        "remote_cache": "Semantic-Blind + Realistic Remote Cache",
+        "sys_simulated": "Framework-Level Semantic-Aware (\\sys)",
+    }
+
+    # Select subset based on CLI flag
+    if args.modes == "all":
+        selected: Sequence[str] = list(MODE_DEFS.keys())
+    else:
+        selected = [m.strip() for m in args.modes.split(",") if m.strip()]
+
+    unknown = set(selected) - MODE_DEFS.keys()
+    if unknown:
+        raise ValueError(f"Unknown mode(s) requested via --modes: {', '.join(unknown)}")
+
+    MODES = [(m, MODE_DEFS[m]) for m in selected]
 
     try:
         for trial in range(1, args.trials + 1):
@@ -363,6 +376,11 @@ def _parse_args(argv=None):
     p.add_argument("--output", default="results.csv")
     p.add_argument("--output_dir", default="artefacts", help="Where to store GPU utilization logs")
     p.add_argument("--external_server", action="store_true", help="Assume rpc_server is already running externally")
+    p.add_argument(
+        "--modes",
+        default="all",
+        help="Comma-separated subset of modes to run (local,naive,remote_cache,sys_simulated) or 'all'",
+    )
     return p.parse_args(argv)
 
 
