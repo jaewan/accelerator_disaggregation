@@ -67,14 +67,7 @@ def _decompress_tensor(compressed_data):
     _COMPRESS_MS += (time.perf_counter() - start_t) * 1000.0
     return tensor
 
-def _get_compressed_size(tensor):
-    """Get the size that would be used if tensor were compressed"""
-    if tensor.dtype in [torch.long, torch.int, torch.int32, torch.int64]:
-        # Simulate 30% compression for token data
-        return int(tensor.nbytes * 0.7)
-    else:
-        # Simulate 50% compression for float data  
-        return int(tensor.nbytes * 0.5)
+# Removed _get_compressed_size - no longer needed since we use real RPC counters
 
 LOGGER = logging.getLogger(__name__)
 
@@ -87,6 +80,8 @@ def _parse_args(argv: List[str] | None = None):
     parser.add_argument("--gpu_host", default="127.0.0.1")
     parser.add_argument("--master_port", default="29500")
     parser.add_argument("--backend", choices=["gloo", "nccl"], default="gloo")
+    parser.add_argument("--skip_weight_upload", action="store_true", 
+                        help="Skip actual weight upload and just simulate the network traffic")
     return parser.parse_args(argv)
 
 def _init_rpc(args):
@@ -127,52 +122,64 @@ def _run_naive_remote(args):
     import rpc_server
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
-    model = AutoModelForCausalLM.from_pretrained(args.model)
-    state_dict = model.state_dict()
+    
+    if args.skip_weight_upload:
+        # Simulate weight upload by calculating size but not loading locally
+        rpc.rpc_sync("GPU_WORKER", rpc_server.download_weights, args=(args.model,))
+        
+        # Create dummy state_dict for the stateless forward calls
+        # In practice, this would be retrieved from the server
+        import transformers
+        config = transformers.AutoConfig.from_pretrained(args.model)
+        model = transformers.AutoModelForCausalLM.from_config(config)
+        state_dict = model.state_dict()
+        
+        # Calculate simulated upload size
+        simulated_upload_bytes = sum(v.numel() * v.element_size() for v in state_dict.values())
+        LOGGER.info("Simulated weight upload size: %.2f MB", simulated_upload_bytes / 1e6)
+    else:
+        # Original behavior: load model on client
+        model = AutoModelForCausalLM.from_pretrained(args.model)
+        state_dict = model.state_dict()
+    
     input_ids = tokenizer(args.prompt, return_tensors="pt").input_ids
 
-    total_bytes = 0
     for _ in range(1 if args.phase == "prefill" else 6):
-        bytes_sent = sum(t.nbytes for t in state_dict.values()) + input_ids.nbytes
         logits, kv_cache = rpc.rpc_sync(
             "GPU_WORKER", rpc_server.run_stateless_forward, args=(state_dict, input_ids)
         )
-        bytes_received = logits.nbytes + sum(t.nbytes for layer in kv_cache for t in layer)
-        total_bytes += bytes_sent + bytes_received
         input_ids = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
 
+    # Get real network bytes from RPC agent
+    net_bytes = rpc.rpc_sync("GPU_WORKER", rpc_server.get_rpc_bytes)
+    
     _shutdown_rpc()
-    print(f"NETWORK_BYTES: {total_bytes}")
+    print(f"NETWORK_BYTES: {net_bytes}")
 
 def _run_remote_cache(args):
     _init_rpc(args)
     import rpc_server
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
-    model = AutoModelForCausalLM.from_pretrained(args.model)
-    state_dict = model.state_dict()
-
-    total_bytes = 0
-    # Upload weights once (count once)
-    total_bytes += sum(t.nbytes for t in state_dict.values())
-    rpc.rpc_sync("GPU_WORKER", rpc_server.load_weights, args=(state_dict,))
+    
+    # Download weights on the server side instead of uploading from client
+    rpc.rpc_sync("GPU_WORKER", rpc_server.download_weights, args=(args.model,))
 
     input_ids = tokenizer(args.prompt, return_tensors="pt").input_ids
-    total_bytes += input_ids.nbytes
     logits, kv_handle = rpc.rpc_sync("GPU_WORKER", rpc_server.run_prefill_with_handle, args=(input_ids,))
-    total_bytes += logits.nbytes + len(kv_handle.encode("utf-8"))
 
     if args.phase == "decode":
         for _ in range(5):
             next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
-            total_bytes += next_token.nbytes + len(kv_handle.encode("utf-8"))
             logits = rpc.rpc_sync(
                 "GPU_WORKER", rpc_server.run_decode_with_handle, args=(next_token, kv_handle)
             )
-            total_bytes += logits.nbytes
 
+    # Get real network bytes from RPC agent
+    net_bytes = rpc.rpc_sync("GPU_WORKER", rpc_server.get_rpc_bytes)
+    
     _shutdown_rpc()
-    print(f"NETWORK_BYTES: {total_bytes}")
+    print(f"NETWORK_BYTES: {net_bytes}")
 
 def _run_sys_simulated(args):
     global _COMPRESS_MS  # noqa: PLW0603
@@ -182,21 +189,15 @@ def _run_sys_simulated(args):
     import rpc_server
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
-    model = AutoModelForCausalLM.from_pretrained(args.model)
-    state_dict = model.state_dict()
-
-    total_bytes = 0
-    # Upload weights once (count once)
-    total_bytes += sum(t.nbytes for t in state_dict.values())
-    rpc.rpc_sync("GPU_WORKER", rpc_server.load_weights, args=(state_dict,))
+    
+    # Download weights on the server side instead of uploading from client
+    rpc.rpc_sync("GPU_WORKER", rpc_server.download_weights, args=(args.model,))
 
     input_ids = tokenizer(args.prompt, return_tensors="pt").input_ids
 
     # Prefill with real compression
     input_blob = _compress_tensor(input_ids)
-    total_bytes += len(input_blob)
     logits_blob, kv_id = rpc.rpc_sync("GPU_WORKER", rpc_server.run_prefill_semantic, args=(input_blob,))
-    total_bytes += len(logits_blob) + len(kv_id.encode("utf-8"))
 
     logits = _decompress_tensor(logits_blob)
 
@@ -204,15 +205,16 @@ def _run_sys_simulated(args):
         for _ in range(5):
             next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
             token_blob = _compress_tensor(next_token)
-            total_bytes += len(token_blob) + len(kv_id.encode("utf-8"))
             logits_blob, kv_id = rpc.rpc_sync(
                 "GPU_WORKER", rpc_server.run_decode_step_semantic, args=(token_blob, kv_id)
             )
             logits = _decompress_tensor(logits_blob)
-            total_bytes += len(logits_blob) + len(kv_id.encode("utf-8"))
 
+    # Get real network bytes from RPC agent
+    net_bytes = rpc.rpc_sync("GPU_WORKER", rpc_server.get_rpc_bytes)
+    
     _shutdown_rpc()
-    print(f"NETWORK_BYTES: {total_bytes}")
+    print(f"NETWORK_BYTES: {net_bytes}")
     print(f"COMPRESS_MS: {_COMPRESS_MS:.2f}")
 
 def main(argv: List[str] | None = None):

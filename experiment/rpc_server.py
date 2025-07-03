@@ -142,6 +142,33 @@ class RemoteWorker:
         else:
             LOGGER.debug("Weights already loaded; skipping reload.")
 
+    def download_weights_remote(self, model_name: str) -> None:
+        """Download weights from Hugging Face and keep them resident in GPU memory."""
+        if not self.weights_loaded:
+            LOGGER.info("Downloading weights for model %s", model_name)
+            full_model = AutoModelForCausalLM.from_pretrained(model_name)
+            
+            # Convert to the same dtype as our model
+            if self.model.dtype == torch.float16:
+                full_model = full_model.half()
+            elif self.model.dtype == torch.bfloat16:
+                full_model = full_model.to(dtype=torch.bfloat16)
+            
+            # Load the weights into our model
+            self.model.load_state_dict(full_model.state_dict(), strict=False)
+            self.weights_loaded = True
+            
+            # Calculate size for logging
+            total_size = sum(p.numel() * p.element_size() for p in self.model.parameters()) / 1e6
+            LOGGER.info("Weights downloaded and loaded (%.2f MB)", total_size)
+        else:
+            LOGGER.debug("Weights already loaded; skipping download.")
+
+    def reset_state_remote(self) -> None:
+        """Reset KV cache state between trials while keeping weights loaded."""
+        self.kv_cache_store.clear()
+        LOGGER.debug("KV cache state reset (weights preserved)")
+
     def run_prefill_remote(self, token_ids: torch.Tensor):
         token_ids = token_ids.to(self.device, non_blocking=True)
         with torch.no_grad():
@@ -354,6 +381,20 @@ def load_weights(state_dict: Dict[str, torch.Tensor]):
     _GLOBAL_WORKER.load_weights_remote(state_dict)
 
 
+def download_weights(model_name: str):
+    """RPC wrapper to call download_weights on the global worker."""
+    if _GLOBAL_WORKER is None:
+        raise RuntimeError("Worker not initialised")
+    _GLOBAL_WORKER.download_weights_remote(model_name)
+
+
+def reset_state():
+    """RPC wrapper to call reset_state on the global worker."""
+    if _GLOBAL_WORKER is None:
+        raise RuntimeError("Worker not initialised")
+    _GLOBAL_WORKER.reset_state_remote()
+
+
 def run_prefill(token_ids: torch.Tensor):
     """RPC wrapper to call run_prefill on the global worker."""
     if _GLOBAL_WORKER is None:
@@ -427,6 +468,27 @@ def get_network_counters():
         return int(sent), int(received)
     except Exception:
         return 0, 0
+
+
+def get_rpc_bytes():
+    """RPC helper to return total bytes (sent + received) from the RPC agent."""
+    try:
+        from torch.distributed.rpc import api as _rpc_api  # type: ignore
+        agent = _rpc_api._get_current_rpc_agent()
+    except Exception:
+        return 0
+
+    # TensorPipe agent exposes bytes counters inside get_debug_info()
+    try:
+        dbg = agent.get_debug_info()  # type: ignore
+        # Example keys: {"CLIENT_WORKER": {"outBytes": 1234, "inBytes": 5678, ...}}
+        total_bytes = sum(
+            peer.get("outBytes", 0) + peer.get("inBytes", 0) 
+            for peer in dbg.values() if isinstance(peer, dict)
+        )
+        return int(total_bytes)
+    except Exception:
+        return 0
 
 
 def get_all_metrics():

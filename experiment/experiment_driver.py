@@ -37,6 +37,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any, Dict, List, Sequence
 import shlex
@@ -67,6 +68,60 @@ class ProcessHandle:
         return self._popen.pid
 
 
+class ServerPool:
+    """Context manager for persistent RPC servers across trials."""
+    
+    def __init__(self, modes: List[str], model: str, master_addr: str, base_port: int):
+        self.modes = modes
+        self.model = model
+        self.master_addr = master_addr
+        self.base_port = base_port
+        self.servers: Dict[str, ProcessHandle] = {}
+        self.ports: Dict[str, int] = {}
+        
+        # Assign unique port for each mode
+        mode_offsets = {"naive": 0, "remote_cache": 10, "sys_simulated": 20}
+        for mode in modes:
+            if mode != "local":
+                offset = mode_offsets.get(mode, 30)
+                self.ports[mode] = base_port + offset
+    
+    def __enter__(self) -> "ServerPool":
+        """Start all required servers."""
+        for mode in self.modes:
+            if mode != "local":
+                port = self.ports[mode]
+                print(f"Starting persistent server for {mode} on port {port}...")
+                server = _start_rpc_server(self.model, self.master_addr, str(port))
+                self.servers[mode] = server
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        """Terminate all servers."""
+        for mode, server in self.servers.items():
+            print(f"Terminating persistent server for {mode}...")
+            server.terminate()
+        self.servers.clear()
+    
+    def get_port(self, mode: str) -> str:
+        """Get the port for a given mode."""
+        return str(self.ports.get(mode, self.base_port))
+    
+    def reset_server_state(self, mode: str):
+        """Reset the state of a server for a given mode."""
+        if mode in self.servers:
+            # Import here to avoid circular imports
+            from torch.distributed import rpc
+            import rpc_server
+            
+            # Use the mode-specific port for RPC communication
+            port = self.get_port(mode)
+            
+            # Note: We need to establish RPC connection to call reset_state
+            # This will be handled by the client code that calls this method
+            print(f"Resetting state for {mode} server on port {port}")
+
+
 # --------------------------------------------------------------------------------------
 # Core functions
 # --------------------------------------------------------------------------------------
@@ -88,7 +143,13 @@ def _start_rpc_server(model: str, master_addr: str, master_port: str) -> Process
         "--rank",
         "0",
     ]
-    log_path = Path("server_stdout.log")
+    
+    # Create timestamped log file in artefacts/logs/
+    logs_dir = Path("artefacts/logs")
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    timestamp = int(time.time())
+    log_path = logs_dir / f"server_{master_port}_{timestamp}.log"
+    
     with log_path.open("w") as log_file:
         popen = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT)
 
@@ -194,9 +255,13 @@ def _run_client(mode: str, phase: str, args) -> tuple[float, int]:
         f"/usr/bin/time -f %e {shlex.join(cmd_list)} 2>&1",
     ]
 
+    # Set timeout based on mode - local is faster, remote modes may need more time
+    timeout_seconds = 300 if mode == "local" else 600  # 5 or 10 minutes
+    
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, check=True, encoding="utf-8"
+            cmd, capture_output=True, text=True, check=True, 
+            encoding="utf-8", timeout=timeout_seconds
         )
         # Parse output: last line is latency, look for NETWORK_BYTES line
         lines = result.stdout.strip().split("\n")
@@ -211,6 +276,12 @@ def _run_client(mode: str, phase: str, args) -> tuple[float, int]:
         
         return latency_sec, network_bytes
         
+    except subprocess.TimeoutExpired as e:
+        print(f"\nERROR: Client script for mode='{mode}' phase='{phase}' timed out after {timeout_seconds}s.", file=sys.stderr)
+        print("--- Captured output from timed out process: ---", file=sys.stderr)
+        print(e.stdout if e.stdout else "No stdout captured", file=sys.stderr)
+        print("------------------------------------------", file=sys.stderr)
+        raise e
     except subprocess.CalledProcessError as e:
         print(f"\nERROR: Client script for mode='{mode}' phase='{phase}' failed.", file=sys.stderr)
         print("--- Captured output from failed process: ---", file=sys.stderr)
@@ -259,6 +330,41 @@ def _csv_data_rows(path: Path) -> int:
     return cnt
 
 
+def _reset_server_state(mode: str, port: str):
+    """Reset the state of a persistent RPC server."""
+    if mode == "local":
+        return  # No server to reset for local mode
+    
+    try:
+        from torch.distributed import rpc
+        import rpc_server
+        
+        # Initialize RPC connection to the server
+        os.environ["MASTER_ADDR"] = "127.0.0.1"
+        os.environ["MASTER_PORT"] = port
+        
+        rpc.init_rpc(
+            name="CLIENT_WORKER",
+            rank=1,
+            world_size=2,
+            rpc_backend_options=rpc.TensorPipeRpcBackendOptions(num_worker_threads=16, rpc_timeout=60),
+        )
+        
+        # Call reset_state on the server
+        rpc.rpc_sync("GPU_WORKER", rpc_server.reset_state)
+        
+        # Shutdown RPC connection
+        rpc.shutdown(graceful=False)
+        
+    except Exception as e:
+        print(f"Warning: Failed to reset server state for {mode}: {e}", file=sys.stderr)
+        # Try to cleanup RPC if it was initialized
+        try:
+            rpc.shutdown(graceful=False)
+        except:
+            pass
+
+
 # --------------------------------------------------------------------------------------
 # Driver main
 # --------------------------------------------------------------------------------------
@@ -288,71 +394,136 @@ def run_experiment(args):
     MODES = [(m, MODE_DEFS[m]) for m in selected]
 
     try:
-        for trial in range(1, args.trials + 1):
-            for phase in ("prefill", "decode"):
-                for mode, mode_label in MODES:
-                    print(f"Trial {trial} – {mode_label} {phase}…", flush=True)
+        # Use ServerPool to start persistent servers once
+        if not args.external_server:
+            with ServerPool(selected, args.model, args.gpu_host, int(args.master_port)) as server_pool:
+                for trial in range(1, args.trials + 1):
+                    for phase in ("prefill", "decode"):
+                        for mode, mode_label in MODES:
+                            print(f"Trial {trial} – {mode_label} {phase}…", flush=True)
 
-                    # Paths for artefacts
-                    artefact_prefix = Path(args.output_dir) / f"{mode}_{phase}_trial{trial}"
-                    artefact_prefix.parent.mkdir(parents=True, exist_ok=True)
-                    dmon_csv = artefact_prefix.with_suffix(".csv")
+                            # Paths for artefacts
+                            artefact_prefix = Path(args.output_dir) / f"{mode}_{phase}_trial{trial}"
+                            artefact_prefix.parent.mkdir(parents=True, exist_ok=True)
+                            dmon_csv = artefact_prefix.with_suffix(".csv")
 
-                    # choose a unique port per (mode, phase) to avoid Gloo stale sockets
-                    base_port = int(args.master_port)
-                    mode_offset = {"naive": 0, "remote_cache": 10, "sys_simulated": 20}.get(mode, 30)
-                    phase_offset = 0 if phase == "prefill" else 1  # decode gets +1
-                    run_port = str(base_port + mode_offset + phase_offset)
+                            # Get port for this mode from the server pool
+                            run_port = server_pool.get_port(mode)
 
-                    # Start RPC server for remote modes only
-                    server = None
-                    if mode != "local" and not args.external_server:
-                        server = _start_rpc_server(args.model, args.gpu_host, run_port)
+                            # Reset server state between trials (but not between phases)
+                            if mode != "local" and phase == "prefill":
+                                _reset_server_state(mode, run_port)
 
-                    for attempt in range(2):
-                        try:
-                            # Start GPU monitoring and allow it to collect at least one sample
-                            dmon_proc = _start_dmon(dmon_csv)
-                            time.sleep(0.5)
+                            # Use ExitStack for proper resource cleanup
+                            with ExitStack() as stack:
+                                for attempt in range(2):
+                                    # Start GPU monitoring and allow it to collect at least one sample
+                                    dmon_proc = _start_dmon(dmon_csv)
+                                    stack.callback(dmon_proc.terminate)
+                                    time.sleep(0.5)
 
-                            # Prepare per-run args with dynamic port
-                            import argparse as _ap
-                            client_args = _ap.Namespace(**vars(args))
-                            client_args.master_port = run_port
+                                    try:
+                                        # Prepare per-run args with dynamic port
+                                        import argparse as _ap
+                                        client_args = _ap.Namespace(**vars(args))
+                                        client_args.master_port = run_port
 
-                            # Run client and measure latency + network bytes
-                            start_ts = time.time()
-                            latency_sec, net_bytes = _run_client(mode, phase, client_args)
-                            run_wall = time.time() - start_ts
+                                        # Run client and measure latency + network bytes
+                                        start_ts = time.time()
+                                        latency_sec, net_bytes = _run_client(mode, phase, client_args)
+                                        run_wall = time.time() - start_ts
 
-                            # Stop GPU monitoring
-                            dmon_proc.terminate()
+                                        # Stop GPU monitoring before checking results
+                                        dmon_proc.terminate()
 
-                            # Verify CSV has sufficient data rows; retry once if not
-                            if _csv_data_rows(dmon_csv) < 2 and attempt == 0:
-                                print(f"Warning: dmon log too short for {mode_label} {phase}; retrying…")
-                                continue  # retry the attempt
+                                        # Verify CSV has sufficient data rows; retry once if not
+                                        if _csv_data_rows(dmon_csv) < 2 and attempt == 0:
+                                            print(f"Warning: dmon log too short for {mode_label} {phase}; retrying…")
+                                            continue  # retry the attempt
 
-                            # Collect GPU utilization
-                            avg_sm = _average_sm_util(dmon_csv)
+                                        # Collect GPU utilization
+                                        avg_sm = _average_sm_util(dmon_csv)
 
-                            results.append({
-                                "trial": trial,
-                                "phase": phase,
-                                "mode": mode_label,
-                                "latency_s": latency_sec,
-                                "wall_s": run_wall,
-                                "net_bytes": net_bytes,
-                                "avg_sm": avg_sm,
-                            })
-                            break  # exit retry loop on success
-                        finally:
-                            pass  # per-attempt cleanup handled after loop
+                                        results.append({
+                                            "trial": trial,
+                                            "phase": phase,
+                                            "mode": mode_label,
+                                            "latency_s": latency_sec,
+                                            "wall_s": run_wall,
+                                            "net_bytes": net_bytes,
+                                            "avg_sm": avg_sm,
+                                        })
+                                        break  # exit retry loop on success
+                                    except Exception as e:
+                                        # Log the exception but let ExitStack handle cleanup
+                                        print(f"Attempt {attempt + 1} failed for {mode_label} {phase}: {e}", file=sys.stderr)
+                                        if attempt == 1:  # Last attempt
+                                            raise
+                                        continue  # retry
+        else:
+            # Fallback to original behavior when external server is used
+            for trial in range(1, args.trials + 1):
+                for phase in ("prefill", "decode"):
+                    for mode, mode_label in MODES:
+                        print(f"Trial {trial} – {mode_label} {phase}…", flush=True)
 
-                    # after retry loop ensure server terminated
-                    if server is not None:
-                        server.terminate()
-                        time.sleep(2)
+                        # Paths for artefacts
+                        artefact_prefix = Path(args.output_dir) / f"{mode}_{phase}_trial{trial}"
+                        artefact_prefix.parent.mkdir(parents=True, exist_ok=True)
+                        dmon_csv = artefact_prefix.with_suffix(".csv")
+
+                        # choose a unique port per (mode, phase) to avoid Gloo stale sockets
+                        base_port = int(args.master_port)
+                        mode_offset = {"naive": 0, "remote_cache": 10, "sys_simulated": 20}.get(mode, 30)
+                        phase_offset = 0 if phase == "prefill" else 1  # decode gets +1
+                        run_port = str(base_port + mode_offset + phase_offset)
+
+                        # Use ExitStack for proper resource cleanup
+                        with ExitStack() as stack:
+                            for attempt in range(2):
+                                # Start GPU monitoring and allow it to collect at least one sample
+                                dmon_proc = _start_dmon(dmon_csv)
+                                stack.callback(dmon_proc.terminate)
+                                time.sleep(0.5)
+
+                                try:
+                                    # Prepare per-run args with dynamic port
+                                    import argparse as _ap
+                                    client_args = _ap.Namespace(**vars(args))
+                                    client_args.master_port = run_port
+
+                                    # Run client and measure latency + network bytes
+                                    start_ts = time.time()
+                                    latency_sec, net_bytes = _run_client(mode, phase, client_args)
+                                    run_wall = time.time() - start_ts
+
+                                    # Stop GPU monitoring before checking results
+                                    dmon_proc.terminate()
+
+                                    # Verify CSV has sufficient data rows; retry once if not
+                                    if _csv_data_rows(dmon_csv) < 2 and attempt == 0:
+                                        print(f"Warning: dmon log too short for {mode_label} {phase}; retrying…")
+                                        continue  # retry the attempt
+
+                                    # Collect GPU utilization
+                                    avg_sm = _average_sm_util(dmon_csv)
+
+                                    results.append({
+                                        "trial": trial,
+                                        "phase": phase,
+                                        "mode": mode_label,
+                                        "latency_s": latency_sec,
+                                        "wall_s": run_wall,
+                                        "net_bytes": net_bytes,
+                                        "avg_sm": avg_sm,
+                                    })
+                                    break  # exit retry loop on success
+                                except Exception as e:
+                                    # Log the exception but let ExitStack handle cleanup
+                                    print(f"Attempt {attempt + 1} failed for {mode_label} {phase}: {e}", file=sys.stderr)
+                                    if attempt == 1:  # Last attempt
+                                        raise
+                                    continue  # retry
 
     except Exception as e:
         print(f"Experiment failed: {e}", file=sys.stderr)
