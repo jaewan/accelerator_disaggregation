@@ -43,13 +43,16 @@ logging.basicConfig(
 
 _COMPRESS_MS: float = 0.0  # accumulated encode/decode time in milliseconds
 
-def _tensor_to_numpy_bytes(tensor: torch.Tensor) -> bytes:
-    """Serialize a tensor (CPU) to bytes using pickle for simplicity."""
-    return pickle.dumps(tensor.cpu().numpy(), protocol=pickle.HIGHEST_PROTOCOL)
+def _tensor_to_bytes(tensor: torch.Tensor) -> bytes:
+    """Serialize a tensor to bytes using torch.save (no numpy dependency)."""
+    buffer = io.BytesIO()
+    torch.save(tensor.cpu(), buffer)
+    return buffer.getvalue()
 
-def _numpy_bytes_to_tensor(buf: bytes) -> torch.Tensor:
-    arr = pickle.loads(buf)
-    return torch.from_numpy(arr)
+
+def _bytes_to_tensor(buf: bytes) -> torch.Tensor:
+    buffer = io.BytesIO(buf)
+    return torch.load(buffer)
 
 def _compress_tensor(tensor):
     """Semantic-aware compression helper that tracks elapsed time (simulation)."""
@@ -61,7 +64,7 @@ def _compress_tensor(tensor):
     if tensor.dtype == torch.float32:
         tensor = tensor.half()
 
-    blob = zlib.compress(_tensor_to_numpy_bytes(tensor), level=6)
+    blob = zlib.compress(_tensor_to_bytes(tensor), level=6)
     _COMPRESS_MS += (time.perf_counter() - start_t) * 1000.0
     return blob
 
@@ -70,7 +73,7 @@ def _decompress_tensor(compressed_data):
     global _COMPRESS_MS  # noqa: PLW0603
     start_t = time.perf_counter()
 
-    tensor = _numpy_bytes_to_tensor(zlib.decompress(compressed_data))
+    tensor = _bytes_to_tensor(zlib.decompress(compressed_data))
     # Restore to float32 for logits if originally half? Keep as float16 is fine.
     _COMPRESS_MS += (time.perf_counter() - start_t) * 1000.0
     return tensor

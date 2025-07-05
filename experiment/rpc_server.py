@@ -18,6 +18,7 @@ import uuid
 from typing import Any, Dict, List, Tuple
 import zlib
 import pickle
+import io
 
 import torch  # type: ignore
 from torch.distributed import rpc  # type: ignore
@@ -91,21 +92,20 @@ class RemoteWorker:
         return moved
 
     def _compress_tensor(self, tensor):
-        """Semantic-aware compression: compress tensor using knowledge of structure"""
+        """Compress tensor via torch.save to avoid NumPy dependency."""
         if tensor.dtype != torch.float16:
-            tensor_half = tensor.half()
-        else:
-            tensor_half = tensor
-        
-        tensor_bytes = pickle.dumps(tensor_half.cpu().numpy())
-        compressed = zlib.compress(tensor_bytes, level=6)
-        return compressed
+            tensor = tensor.half()
+
+        buffer = io.BytesIO()
+        torch.save(tensor.cpu(), buffer)
+        return zlib.compress(buffer.getvalue(), level=6)
 
     def _decompress_tensor(self, compressed_data):
-        """Decompress tensor data"""
+        """Inverse of _compress_tensor."""
         decompressed = zlib.decompress(compressed_data)
-        tensor_np = pickle.loads(decompressed)
-        return torch.from_numpy(tensor_np).to(self.device)
+        buffer = io.BytesIO(decompressed)
+        tensor = torch.load(buffer)
+        return tensor.to(self.device)
 
     # ------------------------------------------------------------------
     # Naive, stateless execution path
