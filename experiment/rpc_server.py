@@ -334,10 +334,15 @@ def main(argv: List[str] | None = None):
     # The client will create RemoteWorker instances via rpc.remote().
 
     # Use default RPC backend options
+    import torch.distributed.rpc as drv
+    opts = drv.TensorPipeRpcBackendOptions(  # type: ignore[attr-defined]
+        rpc_timeout=1800
+    )
     rpc.init_rpc(
         name="GPU_WORKER",
         rank=args.rank,
         world_size=args.world_size,
+        rpc_backend_options=opts,
     )
 
     # Keep process alive until interrupted.

@@ -156,11 +156,15 @@ def _init_rpc(args):
         try:
             print(f"Initializing RPC connection to {args.gpu_host}:{args.master_port} (attempt {attempt + 1}/3)")
             
-            # Use default RPC backend options
+            # Use RPC backend options with an extended timeout (30 min)
+            opts = rpc.TensorPipeRpcBackendOptions(  # type: ignore[attr-defined]
+                rpc_timeout=1800  # seconds
+            )
             rpc.init_rpc(
                 name="CLIENT_WORKER",
                 rank=1,
                 world_size=2,
+                rpc_backend_options=opts,
             )
             print("RPC connection established successfully")
             return
