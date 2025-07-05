@@ -94,6 +94,12 @@ class ServerPool:
                 print(f"Starting persistent server for {mode} on port {port}...")
                 server = _start_rpc_server(self.model, self.master_addr, str(port))
                 self.servers[mode] = server
+        
+        # Give servers additional time to fully initialize
+        if self.servers:
+            print("Waiting for servers to fully initialize...")
+            time.sleep(2.0)
+        
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
@@ -106,20 +112,6 @@ class ServerPool:
     def get_port(self, mode: str) -> str:
         """Get the port for a given mode."""
         return str(self.ports.get(mode, self.base_port))
-    
-    def reset_server_state(self, mode: str):
-        """Reset the state of a server for a given mode."""
-        if mode in self.servers:
-            # Import here to avoid circular imports
-            from torch.distributed import rpc
-            import rpc_server
-            
-            # Use the mode-specific port for RPC communication
-            port = self.get_port(mode)
-            
-            # Note: We need to establish RPC connection to call reset_state
-            # This will be handled by the client code that calls this method
-            print(f"Resetting state for {mode} server on port {port}")
 
 
 # --------------------------------------------------------------------------------------
@@ -248,6 +240,9 @@ def _run_client(mode: str, phase: str, args) -> tuple[float, int]:
         "--model",
         args.model,
     ]
+    
+    # Add debug info
+    print(f"  Running client: mode={mode}, phase={phase}, port={args.master_port}", flush=True)
     cmd = [
         "bash",
         "-c",
@@ -330,41 +325,6 @@ def _csv_data_rows(path: Path) -> int:
     return cnt
 
 
-def _reset_server_state(mode: str, port: str):
-    """Reset the state of a persistent RPC server."""
-    if mode == "local":
-        return  # No server to reset for local mode
-    
-    try:
-        from torch.distributed import rpc
-        import rpc_server
-        
-        # Initialize RPC connection to the server
-        os.environ["MASTER_ADDR"] = "127.0.0.1"
-        os.environ["MASTER_PORT"] = port
-        
-        rpc.init_rpc(
-            name="CLIENT_WORKER",
-            rank=1,
-            world_size=2,
-            rpc_backend_options=rpc.TensorPipeRpcBackendOptions(num_worker_threads=16, rpc_timeout=60),
-        )
-        
-        # Call reset_state on the server
-        rpc.rpc_sync("GPU_WORKER", rpc_server.reset_state)
-        
-        # Shutdown RPC connection
-        rpc.shutdown(graceful=False)
-        
-    except Exception as e:
-        print(f"Warning: Failed to reset server state for {mode}: {e}", file=sys.stderr)
-        # Try to cleanup RPC if it was initialized
-        try:
-            rpc.shutdown(graceful=False)
-        except:
-            pass
-
-
 # --------------------------------------------------------------------------------------
 # Driver main
 # --------------------------------------------------------------------------------------
@@ -409,10 +369,6 @@ def run_experiment(args):
 
                             # Get port for this mode from the server pool
                             run_port = server_pool.get_port(mode)
-
-                            # Reset server state between trials (but not between phases)
-                            if mode != "local" and phase == "prefill":
-                                _reset_server_state(mode, run_port)
 
                             # Use ExitStack for proper resource cleanup
                             with ExitStack() as stack:

@@ -33,13 +33,18 @@ experiment/
 │       ├── test_stage3_*.py   # Server-side weight loading tests
 │       └── test_stage4_*.py   # Persistent server tests
 ├── ��️ Utilities
-│   └── scripts/               # Smoke tests and CI scripts
+│   └── scripts/               # Setup, validation, and testing scripts
+│       ├── setup_multinode.sh    # Automated multi-node setup
+│       ├── validate_multinode.py # Environment validation
+│       ├── smoke_test.sh         # Quick functionality test
+│       └── ci_test.sh            # CI test suite
 ├── 📋 Documentation
 │   ├── Plan.md               # Research methodology and goals
 │   └── Enhancement_Plan.md   # Technical implementation roadmap
 └── ⚙️ Configuration
     ├── requirements.txt       # Python dependencies
-    └── .gitignore            # Git ignore patterns
+    ├── .gitignore            # Git ignore patterns
+    └── MULTINODE_CHECKLIST.md # Multi-node setup checklist
 ```
 
 ## 🚀 Quick Start
@@ -107,12 +112,36 @@ python experiment_driver.py \
 
 ### Multi-Node Experiments
 
+#### Quick Setup (Recommended)
+
+**1. On BOTH CLIENT_HOST and GPU_HOST:**
+```bash
+git clone https://github.com/jaewan/accelerator_disaggregation.git
+cd accelerator_disaggregation/experiment
+
+# Automated setup script
+chmod +x scripts/setup_multinode.sh
+./scripts/setup_multinode.sh
+```
+
+**2. Validate connectivity:**
+```bash
+# On CLIENT_HOST - test connection to GPU_HOST
+source venv/bin/activate
+python scripts/validate_multinode.py --gpu-host <GPU_HOST_IP>
+
+# On GPU_HOST - validate local setup
+source venv/bin/activate
+python scripts/validate_multinode.py
+```
+
 #### Option 1: Managed Servers (Recommended)
 
 The framework automatically starts/stops servers:
 
 **On CLIENT_HOST:**
 ```bash
+source venv/bin/activate
 python experiment_driver.py \
     --trials 3 \
     --gpu_host <GPU_HOST_IP> \
@@ -127,6 +156,7 @@ For more control, manually start servers:
 
 **On GPU_HOST:**
 ```bash
+source venv/bin/activate
 python rpc_server.py \
     --model sshleifer/tiny-gpt2 \
     --master_addr 0.0.0.0 \
@@ -135,6 +165,7 @@ python rpc_server.py \
 
 **On CLIENT_HOST:**
 ```bash
+source venv/bin/activate
 python experiment_driver.py \
     --trials 3 \
     --gpu_host <GPU_HOST_IP> \
@@ -264,6 +295,28 @@ tail -f artefacts/logs/server_*_*.log
 # Verify network connectivity  
 ping <gpu_host>
 telnet <gpu_host> <port>
+
+# Use validation script
+python scripts/validate_multinode.py --gpu-host <gpu_host>
+```
+
+**Environment Inconsistencies:**
+```bash
+# Check PyTorch versions match on both hosts
+python -c "import torch; print(torch.__version__)"
+
+# Rebuild environment from scratch
+rm -rf venv
+./scripts/setup_multinode.sh
+```
+
+**Firewall Issues:**
+```bash
+# Allow RPC ports on GPU host
+sudo ufw allow 29500:29530/tcp
+
+# Test specific port
+telnet <gpu_host> 29501
 ```
 
 **GPU Memory Errors:**

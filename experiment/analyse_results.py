@@ -47,8 +47,8 @@ def analyse(csv_path: Path, out_md: Path | None = None):
     # Paired t-test (sys vs remote_cache) per phase for latency
     pvals: Dict[str, float] = {}
     for phase in df["phase"].unique():
-        a = df[(df["phase"] == phase) & (df["mode"].str.contains("Semantic-Aware"))]["latency_s"].reset_index(drop=True)
-        b = df[(df["phase"] == phase) & (df["mode"].str.contains("Realistic Remote Cache"))]["latency_s"].reset_index(drop=True)
+        a = df[(df["phase"] == phase) & (df["mode"] == "sys_simulated")]["latency_s"].reset_index(drop=True)
+        b = df[(df["phase"] == phase) & (df["mode"] == "remote_cache")]["latency_s"].reset_index(drop=True)
         pvals[phase] = _paired_t(a, b)
 
     md_lines = ["# Experiment Summary", ""]
@@ -84,4 +84,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main() 
+    main()

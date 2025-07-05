@@ -30,9 +30,6 @@ logging.basicConfig(
 )
 LOGGER = logging.getLogger(__name__)
 
-# Global references populated on the server node after initialisation
-_GLOBAL_WORKER: RemoteWorker | None = None  # type: ignore
-
 
 # --------------------------------------------------------------------------------------
 # Remote worker implementation
@@ -72,6 +69,13 @@ class RemoteWorker:
         self.weights_loaded: bool = False
         self.kv_cache_store: Dict[str, Any] = {}
         LOGGER.info("RemoteWorker ready (weights_loaded=%s)", self.weights_loaded)
+
+    def get_rpc_bytes(self) -> int:
+        """Return total bytes (sent + received) from the RPC agent."""
+        # This is a placeholder. Real implementation would query the agent.
+        # Note: Accessing internal agent metrics can be unstable across versions.
+        # For this experiment, we will rely on values returned by the client call.
+        return 0
 
     # ------------------------------------------------------------------
     # Helper utilities
@@ -302,8 +306,8 @@ def _parse_args(argv: List[str] | None = None):
     parser.add_argument("--model", default="gpt2", help="HF model name or path")
     parser.add_argument("--master_addr", default="127.0.0.1", help="RPC master address")
     parser.add_argument("--master_port", default="29500", help="RPC master port")
-    parser.add_argument("--rank", type=int, default=0)
-    parser.add_argument("--world_size", type=int, default=2, help="Total number of RPC workers (usually 2: client + server)")
+    parser.add_argument("--rank", type=int, default=0, help="Rank of this worker")
+    parser.add_argument("--world_size", type=int, default=2, help="Total number of RPC workers")
     parser.add_argument("--backend", choices=["gloo", "nccl"], default="gloo")
     return parser.parse_args(argv)
 
@@ -326,17 +330,14 @@ def main(argv: List[str] | None = None):
         args.master_port,
     )
 
-    # Create the global worker instance before RPC init so that other threads can access.
-    global _GLOBAL_WORKER  # noqa: PLW0603
-    _GLOBAL_WORKER = RemoteWorker(model_name=args.model)
+    # The server no longer creates a worker instance itself.
+    # The client will create RemoteWorker instances via rpc.remote().
 
+    # Use default RPC backend options
     rpc.init_rpc(
         name="GPU_WORKER",
         rank=args.rank,
         world_size=args.world_size,
-        rpc_backend_options=rpc.TensorPipeRpcBackendOptions(
-            num_worker_threads=16, rpc_timeout=300
-        ),
     )
 
     # Keep process alive until interrupted.
@@ -365,140 +366,6 @@ def main(argv: List[str] | None = None):
     finally:
         _safe_rpc_shutdown()
         LOGGER.info("RPC server shut down.")
-
-
-def run_stateless_forward(state_dict: Dict[str, torch.Tensor], input_ids: torch.Tensor, kv_cache: Any | None = None):
-    """RPC wrapper to call stateless forward on the global worker and return outputs."""
-    if _GLOBAL_WORKER is None:
-        raise RuntimeError("Worker not initialised")
-    return _GLOBAL_WORKER.run_stateless_forward_remote(state_dict, input_ids, kv_cache)
-
-
-def load_weights(state_dict: Dict[str, torch.Tensor]):
-    """RPC wrapper to call load_weights on the global worker."""
-    if _GLOBAL_WORKER is None:
-        raise RuntimeError("Worker not initialised")
-    _GLOBAL_WORKER.load_weights_remote(state_dict)
-
-
-def download_weights(model_name: str):
-    """RPC wrapper to call download_weights on the global worker."""
-    if _GLOBAL_WORKER is None:
-        raise RuntimeError("Worker not initialised")
-    _GLOBAL_WORKER.download_weights_remote(model_name)
-
-
-def reset_state():
-    """RPC wrapper to call reset_state on the global worker."""
-    if _GLOBAL_WORKER is None:
-        raise RuntimeError("Worker not initialised")
-    _GLOBAL_WORKER.reset_state_remote()
-
-
-def run_prefill(token_ids: torch.Tensor):
-    """RPC wrapper to call run_prefill on the global worker."""
-    if _GLOBAL_WORKER is None:
-        raise RuntimeError("Worker not initialised")
-    return _GLOBAL_WORKER.run_prefill_remote(token_ids)
-
-
-def run_decode_step(token_id: torch.Tensor, kv_cache_id: str):
-    """RPC wrapper to call run_decode_step on the global worker."""
-    if _GLOBAL_WORKER is None:
-        raise RuntimeError("Worker not initialised")
-    return _GLOBAL_WORKER.run_decode_step_remote(token_id, kv_cache_id)
-
-
-def run_prefill_with_cache(token_ids: torch.Tensor):
-    """RPC wrapper for remote cache baseline - returns actual KV cache tensors."""
-    if _GLOBAL_WORKER is None:
-        raise RuntimeError("Worker not initialised")
-    return _GLOBAL_WORKER.run_prefill_with_cache_remote(token_ids)
-
-
-def run_decode_step_with_cache(token_id: torch.Tensor, kv_cache: Any):
-    """RPC wrapper for remote cache baseline - uses actual KV cache tensors."""
-    if _GLOBAL_WORKER is None:
-        raise RuntimeError("Worker not initialised")
-    return _GLOBAL_WORKER.run_decode_step_with_cache_remote(token_id, kv_cache)
-
-
-def run_prefill_with_handle(input_ids: torch.Tensor):
-    """RPC wrapper for realistic semantic-blind caching baseline."""
-    if _GLOBAL_WORKER is None:
-        raise RuntimeError("Worker not initialised")
-    return _GLOBAL_WORKER.run_prefill_with_handle(input_ids)
-
-
-def run_decode_with_handle(token_id: torch.Tensor, kv_handle: str):
-    """RPC wrapper for realistic semantic-blind caching baseline."""
-    if _GLOBAL_WORKER is None:
-        raise RuntimeError("Worker not initialised")
-    return _GLOBAL_WORKER.run_decode_with_handle(token_id, kv_handle)
-
-
-def run_prefill_semantic(token_blob: bytes):
-    """RPC wrapper for semantic-aware prefill with compression."""
-    if _GLOBAL_WORKER is None:
-        raise RuntimeError("Worker not initialised")
-    return _GLOBAL_WORKER.run_prefill_semantic(token_blob)
-
-
-def run_decode_step_semantic(token_blob: bytes, kv_cache_id: str):
-    """RPC wrapper for semantic-aware decode with compression."""
-    if _GLOBAL_WORKER is None:
-        raise RuntimeError("Worker not initialised")
-    return _GLOBAL_WORKER.run_decode_step_semantic(token_blob, kv_cache_id)
-
-
-def get_network_counters():
-    """RPC helper to return (sent_bytes, received_bytes) from the RPC agent."""
-    try:
-        from torch.distributed.rpc import api as _rpc_api  # type: ignore
-        agent = _rpc_api._get_current_rpc_agent()
-    except Exception:
-        return 0, 0
-
-    # TensorPipe agent exposes bytes counters inside get_debug_info()
-    try:
-        dbg = agent.get_debug_info()  # type: ignore
-        # Example keys: {"CLIENT_WORKER": {"outBytes": 1234, "inBytes": 5678, ...}}
-        sent = sum(peer.get("outBytes", 0) for peer in dbg.values() if isinstance(peer, dict))
-        received = sum(peer.get("inBytes", 0) for peer in dbg.values() if isinstance(peer, dict))
-        return int(sent), int(received)
-    except Exception:
-        return 0, 0
-
-
-def get_rpc_bytes():
-    """RPC helper to return total bytes (sent + received) from the RPC agent."""
-    try:
-        from torch.distributed.rpc import api as _rpc_api  # type: ignore
-        agent = _rpc_api._get_current_rpc_agent()
-    except Exception:
-        return 0
-
-    # TensorPipe agent exposes bytes counters inside get_debug_info()
-    try:
-        dbg = agent.get_debug_info()  # type: ignore
-        # Example keys: {"CLIENT_WORKER": {"outBytes": 1234, "inBytes": 5678, ...}}
-        total_bytes = sum(
-            peer.get("outBytes", 0) + peer.get("inBytes", 0) 
-            for peer in dbg.values() if isinstance(peer, dict)
-        )
-        return int(total_bytes)
-    except Exception:
-        return 0
-
-
-def get_all_metrics():
-    """Return raw metrics dict from RPC agent (for debugging)."""
-    try:
-        from torch.distributed.rpc import api as _rpc_api  # type: ignore
-        agent = _rpc_api._get_current_rpc_agent()
-        return agent.get_metrics() if hasattr(agent, "get_metrics") else {}
-    except Exception:
-        return {}
 
 
 # Ensure this module is discoverable under the name 'rpc_server' even when executed
