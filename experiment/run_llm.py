@@ -124,6 +124,8 @@ def _collect_net_bytes() -> int:
         agent = _get_current_rpc_agent()
         if agent is not None and hasattr(agent, "get_metrics"):
             metrics = agent.get_metrics()  # type: ignore[attr-defined]
+            # DEBUG: indicate that the fallback _get_current_rpc_agent path was taken
+            print("[DEBUG] _collect_net_bytes: fallback metrics from _get_current_rpc_agent:", metrics, file=sys.stderr)
             sent = int(metrics.get("rpc.agent.sent_bytes", 0))  # type: ignore[arg-type]
             recv = int(metrics.get("rpc.agent.received_bytes", 0))  # type: ignore[arg-type]
             return sent + recv
