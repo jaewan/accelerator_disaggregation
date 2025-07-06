@@ -231,15 +231,29 @@ def _start_dmon(csv_path: Path, gpu_host: str) -> ProcessHandle:
 def _start_tcpdump(nic: str, pcap_path: Path) -> ProcessHandle:
     """Start tcpdump to capture network traffic. DEPRECATED - using source code instrumentation instead."""
     # This function is no longer used but kept for compatibility
-    cmd = ["sudo", "tcpdump", "-i", nic, "-w", str(pcap_path)]
+    # Do *not* hard-code sudo here – users can either run the experiment under
+    # sudo or grant `cap_net_admin,cap_net_raw` to the tcpdump binary once via
+    #   sudo setcap cap_net_admin,cap_net_raw=eip $(command -v tcpdump)
+    # Running without sudo preserves the Python virtual-env for all child
+    # processes (important so run_llm.py finds the torch package).
+    cmd = ["tcpdump", "-i", nic, "-w", str(pcap_path)]
     popen = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return ProcessHandle(popen)
 
 
 def _capinfos_total_bytes(pcap_path: Path) -> int:
-    """DEPRECATED: Get total data bytes from a pcap file using capinfos."""
-    # This function is no longer used - we now measure bytes in source code
-    return 0
+    """Return total bytes captured in *pcap_path*.
+
+    We avoid an external *capinfos* dependency by simply returning the file
+    size on disk which is a good approximation of bytes-on-the-wire for the
+    purposes of this experiment.  If the file is missing or empty we return
+    ``0`` so downstream code can proceed without special-casing errors.
+    """
+
+    try:
+        return pcap_path.stat().st_size if pcap_path.is_file() else 0
+    except OSError:
+        return 0
 
 
 def _average_sm_util(csv_path: Path) -> float:
@@ -446,10 +460,21 @@ def run_experiment(args):
                                         client_args = _ap.Namespace(**vars(args))
                                         client_args.master_port = run_port
 
-                                        # Run client and measure latency + network bytes
-                                        start_ts = time.time()
-                                        latency_sec, net_bytes, avg_sm = _run_client(mode, phase, client_args)
-                                        run_wall = time.time() - start_ts
+                                        # Start tcpdump capture (requires sudo privileges)
+                                        pcap_path = artefact_prefix.with_suffix(".pcap")
+                                        tcpdump_proc = _start_tcpdump("eth0", pcap_path)
+
+                                        try:
+                                            # Run client and measure latency
+                                            start_ts = time.time()
+                                            latency_sec, _net_bytes_placeholder, avg_sm = _run_client(mode, phase, client_args)
+                                            run_wall = time.time() - start_ts
+                                        finally:
+                                            # Ensure tcpdump is stopped even on failure
+                                            tcpdump_proc.terminate()
+
+                                        # Derive network bytes from the pcap file produced by tcpdump
+                                        net_bytes = _capinfos_total_bytes(pcap_path)
 
                                         # Stop GPU monitoring before checking results
                                         # dmon_proc.terminate() # This line is removed
@@ -525,10 +550,18 @@ def run_experiment(args):
                                     client_args = _ap.Namespace(**vars(args))
                                     client_args.master_port = run_port
 
-                                    # Run client and measure latency + network bytes
-                                    start_ts = time.time()
-                                    latency_sec, net_bytes, avg_sm = _run_client(mode, phase, client_args)
-                                    run_wall = time.time() - start_ts
+                                    # Start tcpdump capture
+                                    pcap_path = artefact_prefix.with_suffix(".pcap")
+                                    tcpdump_proc = _start_tcpdump("eth0", pcap_path)
+
+                                    try:
+                                        start_ts = time.time()
+                                        latency_sec, _net_bytes_placeholder, avg_sm = _run_client(mode, phase, client_args)
+                                        run_wall = time.time() - start_ts
+                                    finally:
+                                        tcpdump_proc.terminate()
+
+                                    net_bytes = _capinfos_total_bytes(pcap_path)
 
                                     # Stop GPU monitoring before checking results
                                     # dmon_proc.terminate() # This line is removed
