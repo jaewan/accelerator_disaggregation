@@ -6,8 +6,10 @@
 # Ports used:
 #   29500  - naive baseline (prefill)
 #   29505  - naive baseline (decode)
-#   29510  - remote-cache baseline
-#   29520  - framework-level semantic-aware (\sys)
+#   29510  - remote-cache baseline (prefill)
+#   29515  - remote-cache baseline (decode)
+#   29520  - framework-level semantic-aware (\sys) prefill
+#   29525  - framework-level semantic-aware (\sys) decode
 #
 # Logs are stored under logs/ in the same directory as this script.
 #
@@ -61,7 +63,13 @@ start_server() {
 # Start servers for all required ports
 start_server 29500 naive_prefill.log
 start_server 29505 naive_decode.log
-start_server 29510 remote_cache.log
-start_server 29520 sys_simulated.log
+
+# Remote-cache baseline
+start_server 29510 remote_cache_prefill.log
+start_server 29515 remote_cache_decode.log
+
+# Framework-level semantic-aware (\sys) baseline
+start_server 29520 sys_simulated_prefill.log
+start_server 29525 sys_simulated_decode.log
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] All RPC servers started." 

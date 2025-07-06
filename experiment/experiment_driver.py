@@ -76,24 +76,34 @@ class ServerPool:
         self.model = model
         self.master_addr = master_addr
         self.base_port = base_port
-        self.servers: Dict[str, ProcessHandle] = {}
-        self.ports: Dict[str, int] = {}
-        
-        # Assign unique port for each mode
+        self.servers: Dict[int, ProcessHandle] = {}
+        # Map (mode, phase) -> port. Each decode phase gets an additional +5 port
+        # offset to avoid TensorPipe stale-socket dead-locks when a new client
+        # process reconnects to the same server.
+        self.ports: Dict[tuple[str, str], int] = {}
+
         mode_offsets = {"naive": 0, "remote_cache": 10, "sys_simulated": 20}
+        phase_offsets = {"prefill": 0, "decode": 5}
+
         for mode in modes:
-            if mode != "local":
-                offset = mode_offsets.get(mode, 30)
-                self.ports[mode] = base_port + offset
+            if mode == "local":
+                continue  # local baseline runs entirely on the client
+
+            base_offset = mode_offsets.get(mode, 30)
+            for phase, p_off in phase_offsets.items():
+                self.ports[(mode, phase)] = base_port + base_offset + p_off
     
     def __enter__(self) -> "ServerPool":
         """Start all required servers."""
-        for mode in self.modes:
-            if mode != "local":
-                port = self.ports[mode]
-                print(f"Starting persistent server for {mode} on port {port}...")
-                server = _start_rpc_server(self.model, self.master_addr, str(port))
-                self.servers[mode] = server
+        started: set[int] = set()
+        for (mode, phase), port in self.ports.items():
+            # Avoid launching the same port twice if multiple (mode, phase) map to it
+            if port in started:
+                continue
+            print(f"Starting persistent server for {mode}-{phase} on port {port}...")
+            server = _start_rpc_server(self.model, self.master_addr, str(port))
+            self.servers[port] = server
+            started.add(port)
         
         # Give servers additional time to fully initialize
         if self.servers:
@@ -104,14 +114,14 @@ class ServerPool:
     
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Terminate all servers."""
-        for mode, server in self.servers.items():
-            print(f"Terminating persistent server for {mode}...")
+        for port, server in self.servers.items():
+            print(f"Terminating persistent server on port {port}…")
             server.terminate()
         self.servers.clear()
-    
-    def get_port(self, mode: str) -> str:
-        """Get the port for a given mode."""
-        return str(self.ports.get(mode, self.base_port))
+
+    def get_port(self, mode: str, phase: str) -> str:
+        """Return the port allocated for (mode, phase)."""
+        return str(self.ports.get((mode, phase), self.base_port))
 
 
 # --------------------------------------------------------------------------------------
@@ -386,7 +396,7 @@ def run_experiment(args):
                             dmon_csv = artefact_prefix.with_suffix(".csv")
 
                             # Get port for this mode from the server pool
-                            run_port = server_pool.get_port(mode)
+                            run_port = server_pool.get_port(mode, phase)
 
                             # Use ExitStack for proper resource cleanup
                             with ExitStack() as stack:
@@ -447,17 +457,13 @@ def run_experiment(args):
                         dmon_csv = artefact_prefix.with_suffix(".csv")
 
                         # choose a unique port per (mode, phase) to avoid Gloo stale sockets
-                        # Use ONE persistent RPC server per mode when --external_server is supplied.
-                        # The user is expected to have already launched servers on:
-                        #   base_port + mode_offset  (same port reused for both prefill & decode).
-                        # This mirrors the behaviour of the internal ServerPool above and avoids
-                        # connection failures when only a single external server is running.
+                        # Expect *two* servers per remote mode (prefill & decode) when
+                        # --external_server is supplied.  Each decode server listens on
+                        # `base_port + mode_offset + 5`.
                         base_port = int(args.master_port)
                         mode_offset = {"naive": 0, "remote_cache": 10, "sys_simulated": 20}.get(mode, 30)
-                        # Naive baseline uses two separate servers (prefill & decode) to
-                        # avoid TensorPipe connection reuse dead-locks. Decode phase gets
-                        # an extra +5 port offset (29500→29505).
-                        phase_offset = 5 if (mode == "naive" and phase == "decode") else 0
+                        # Use a separate port for every decode phase (avoid stale sockets)
+                        phase_offset = 5 if phase == "decode" and mode != "local" else 0
                         run_port = str(base_port + mode_offset + phase_offset)
 
                         # Use ExitStack for proper resource cleanup
