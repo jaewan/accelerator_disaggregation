@@ -429,10 +429,14 @@ def run_experiment(args):
                         dmon_csv = artefact_prefix.with_suffix(".csv")
 
                         # choose a unique port per (mode, phase) to avoid Gloo stale sockets
+                        # Use ONE persistent RPC server per mode when --external_server is supplied.
+                        # The user is expected to have already launched servers on:
+                        #   base_port + mode_offset  (same port reused for both prefill & decode).
+                        # This mirrors the behaviour of the internal ServerPool above and avoids
+                        # connection failures when only a single external server is running.
                         base_port = int(args.master_port)
                         mode_offset = {"naive": 0, "remote_cache": 10, "sys_simulated": 20}.get(mode, 30)
-                        phase_offset = 0 if phase == "prefill" else 1  # decode gets +1
-                        run_port = str(base_port + mode_offset + phase_offset)
+                        run_port = str(base_port + mode_offset)
 
                         # Use ExitStack for proper resource cleanup
                         with ExitStack() as stack:
