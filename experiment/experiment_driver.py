@@ -265,9 +265,11 @@ def _run_client(mode: str, phase: str, args) -> tuple[float, int]:
     if mode == "local":
         timeout_seconds = 300  # 5 min
     elif mode == "naive":
-        timeout_seconds = 1800  # 30 min safeguard for large uploads
+        timeout_seconds = 1800  # 30-min safeguard for large uploads
     else:
-        timeout_seconds = 600  # 10 min for other remote modes
+        # Remote-cache and \sys modes still move tensors over the network and can be
+        # slow on high-latency links.  Give them the same 30-min window.
+        timeout_seconds = 1800
     
     try:
         result = subprocess.run(
