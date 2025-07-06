@@ -1,0 +1,54 @@
+#!/usr/bin/env bash
+# gpu_server_start.sh
+# Starts one RPC server per mode/phase combination for the semantic-gap experiments.
+# Launch this script on the GPU host (10.8.162.218) before running the client.
+#
+# Ports used:
+#   29500  - naive baseline (prefill)
+#   29505  - naive baseline (decode)
+#   29510  - remote-cache baseline
+#   29520  - framework-level semantic-aware (\sys)
+#
+# Logs are stored under logs/ in the same directory as this script.
+#
+# Usage:
+#   chmod +x gpu_server_start.sh
+#   ./gpu_server_start.sh
+
+set -eu
+
+# Root of the experiment repository (default: current directory)
+ROOT="${ROOT:-$(pwd)}"
+MODEL="${MODEL:-facebook/opt-125m}"
+VENV_ACTIVATE="${VENV_ACTIVATE:-venv/bin/activate}"
+
+cd "$ROOT"
+
+# Activate virtual environment if available
+if [[ -f "$VENV_ACTIVATE" ]]; then
+  # shellcheck source=/dev/null
+  source "$VENV_ACTIVATE"
+fi
+
+mkdir -p logs
+
+start_server() {
+  local port="$1"
+  local logfile="$2"
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Launching rpc_server on port ${port}"
+  nohup python rpc_server.py \
+        --model "$MODEL" \
+        --master_addr 0.0.0.0 \
+        --master_port "$port" \
+        --world_size 2 \
+        --rank 0 \
+        > "logs/${logfile}" 2>&1 &
+}
+
+# Start servers for all required ports
+start_server 29500 naive_prefill.log
+start_server 29505 naive_decode.log
+start_server 29510 remote_cache.log
+start_server 29520 sys_simulated.log
+
+echo "[$(date '+%Y-%m-%d %H:%M:%S')] All RPC servers started." 
