@@ -15,6 +15,7 @@ import os
 import sys
 import time
 from typing import List, Optional
+import uuid
 
 import torch
 from torch.distributed import rpc
@@ -137,16 +138,34 @@ def _parse_args(argv: List[str] | None = None):
     return parser.parse_args(argv)
 
 def _shutdown_rpc():
-    """Shutdown RPC connection quickly (non-graceful) to avoid hangs.
+    """Attempt a graceful RPC shutdown so the server releases rank 1.
 
-    Using ``graceful=False`` aborts outstanding work instead of waiting for all
-    RRefs to be released, which is acceptable for short-lived benchmark
-    clients.
+    Falls back to a non-graceful shutdown if the graceful path hangs for more
+    than ~10 s to keep the client bounded.
     """
-    try:
-        rpc.shutdown(graceful=False)
-    except Exception as e:
-        print(f"Warning: RPC shutdown failed: {e}")
+
+    import threading
+
+    exc: list[Exception | None] = [None]
+
+    def _graceful():  # noqa: D401 – simple helper
+        try:
+            rpc.shutdown(graceful=True)
+        except Exception as e:  # pragma: no cover – best-effort
+            exc[0] = e
+
+    th = threading.Thread(target=_graceful, daemon=True)
+    th.start()
+    th.join(timeout=10.0)
+
+    if th.is_alive():
+        print("Graceful RPC shutdown timed out; aborting…")
+        try:
+            rpc.shutdown(graceful=False)
+        except Exception as e:
+            print(f"Warning: Forced RPC shutdown failed: {e}")
+    elif exc[0] is not None:
+        print(f"Warning: Graceful RPC shutdown raised: {exc[0]}")
 
 
 def _init_rpc(args):
@@ -158,13 +177,15 @@ def _init_rpc(args):
     for attempt in range(3):
         try:
             print(f"Initializing RPC connection to {args.gpu_host}:{args.master_port} (attempt {attempt + 1}/3)")
+
+            client_name = f"CLIENT_WORKER_{uuid.uuid4().hex[:8]}"
             
             # Use RPC backend options with an extended timeout (30 min)
             opts = rpc.TensorPipeRpcBackendOptions(  # type: ignore[attr-defined]
                 rpc_timeout=1800  # seconds
             )
             rpc.init_rpc(
-                name="CLIENT_WORKER",
+                name=client_name,
                 rank=1,
                 world_size=2,
                 rpc_backend_options=opts,
