@@ -29,7 +29,10 @@ if [[ -f "$VENV_ACTIVATE" ]]; then
 fi
 
 ###############################################################################
-# Run the experiment (5 trials, three modes, two phases)
+# Run the experiment (5 trials, three modes, two phases).  Ensure that the GPU
+# server has already been started with ports 29500/29505 (+50 per additional
+# trial) for the naïve baseline and similar offsets for the other modes.  See
+# gpu_server_start.sh for details.
 ###############################################################################
 python experiment_driver.py \
        --trials 5 \

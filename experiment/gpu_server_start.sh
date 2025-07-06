@@ -60,16 +60,29 @@ start_server() {
   echo $! >> "logs/gpu_server_pids.txt"
 }
 
-# Start servers for all required ports
-start_server 29500 naive_prefill.log
-start_server 29505 naive_decode.log
+# How many trials worth of servers to launch (default 5, override with TRIALS=n)
+TRIALS="${TRIALS:-5}"
+PORT_STRIDE=50  # Must match value in experiment_driver.py
 
-# Remote-cache baseline
-start_server 29510 remote_cache_prefill.log
-start_server 29515 remote_cache_decode.log
+# Base port mapping (prefill / decode)
+declare -A BASE_PORTS=(
+  [naive_prefill]=29500
+  [naive_decode]=29505
+  [remote_cache_prefill]=29510
+  [remote_cache_decode]=29515
+  [sys_simulated_prefill]=29520
+  [sys_simulated_decode]=29525
+)
 
-# Framework-level semantic-aware (\sys) baseline
-start_server 29520 sys_simulated_prefill.log
-start_server 29525 sys_simulated_decode.log
+for ((t=0; t<TRIALS; t++)); do
+  offset=$((t * PORT_STRIDE))
+
+  for key in "${!BASE_PORTS[@]}"; do
+    base_port=${BASE_PORTS[$key]}
+    port=$((base_port + offset))
+    logfile="${key}_trial$((t+1)).log"
+    start_server "$port" "$logfile"
+  done
+done
 
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] All RPC servers started." 

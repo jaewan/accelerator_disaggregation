@@ -462,9 +462,19 @@ def run_experiment(args):
                         # `base_port + mode_offset + 5`.
                         base_port = int(args.master_port)
                         mode_offset = {"naive": 0, "remote_cache": 10, "sys_simulated": 20}.get(mode, 30)
-                        # Use a separate port for every decode phase (avoid stale sockets)
+
+                        # Additional per-trial offset to ensure we never reuse the exact same
+                        # (ip, port, rank) rendez-vous across independent client processes.
+                        # This is primarily needed for the naïve baseline which is prone to
+                        # Gloo/TensorPipe stale-socket dead-locks, but we apply it to every
+                        # mode for consistency.
+                        TRIAL_PORT_STRIDE = 50
+                        trial_offset = (trial - 1) * TRIAL_PORT_STRIDE
+
+                        # Separate port for every decode phase (avoid stale sockets *within* a trial)
                         phase_offset = 5 if phase == "decode" and mode != "local" else 0
-                        run_port = str(base_port + mode_offset + phase_offset)
+
+                        run_port = str(base_port + mode_offset + phase_offset + trial_offset)
 
                         # Use ExitStack for proper resource cleanup
                         with ExitStack() as stack:
