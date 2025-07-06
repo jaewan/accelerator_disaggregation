@@ -32,6 +32,16 @@ fi
 
 mkdir -p logs
 
+# Detect whether GPUs are available and choose the appropriate backend for
+# the process-group that RPC implicitly creates.  This does *not* change the
+# RPC transport (still TensorPipe) but ensures NCCL is initialised so that
+# tensors live on GPU by default.
+if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
+  BACKEND="nccl"
+else
+  BACKEND="gloo"
+fi
+
 start_server() {
   local port="$1"
   local logfile="$2"
@@ -42,6 +52,7 @@ start_server() {
         --master_port "$port" \
         --world_size 2 \
         --rank 0 \
+        --backend "$BACKEND" \
         > "logs/${logfile}" 2>&1 &
   # Save PID for later termination
   echo $! >> "logs/gpu_server_pids.txt"
