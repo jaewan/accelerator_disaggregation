@@ -219,21 +219,27 @@ def _run_naive_remote(args):
         state_dict = model.state_dict()
         
         simulated_upload_bytes = sum(v.numel() * v.element_size() for v in state_dict.values())
-        LOGGER.info("Simulated weight upload size: %.2f MB", simulated_upload_bytes / 1e6)
+        LOGGER.info("Simulated weight upload size: %.2f MB (NOT transferred due to --skip_weight_upload)", simulated_upload_bytes / 1e6)
+
+        # Use an *empty* state_dict for actual RPC calls so we don't send gigabytes
+        # over the wire. The remote worker already downloaded real weights, and
+        # its run_stateless_forward_remote method will skip re-loading when the
+        # dict is empty.
+        state_dict_rpc: dict[str, torch.Tensor] = {}
     else:
         # Load model locally to get state_dict for upload.
         model = AutoModelForCausalLM.from_pretrained(args.model)
-        state_dict = model.state_dict()
+        state_dict_rpc = model.state_dict()
     
     input_ids = tokenizer(args.prompt, return_tensors="pt").input_ids
 
-    # In naive mode, we still pass the state_dict in every call.
-    # The remote method is now called on the worker_rref instance.
+    # Call the stateless remote forward. If --skip_weight_upload was set we
+    # are sending an empty dict, otherwise the full weights.
     for _ in range(1 if args.phase == "prefill" else 6):
         logits, kv_cache = _rpc_sync(
             worker_rref,
             rpc_server.RemoteWorker.run_stateless_forward_remote,
-            state_dict,
+            state_dict_rpc,
             input_ids,
         )
         input_ids = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)

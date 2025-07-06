@@ -240,7 +240,15 @@ def _run_client(mode: str, phase: str, args) -> tuple[float, int]:
         "--model",
         args.model,
     ]
-    
+
+    # Naive baseline uploads full model weights every call which can be
+    # prohibitively slow for large models (e.g. GPT-J).  When the user hasn't
+    # explicitly asked for the real upload we add the optimisation flag to
+    # download weights once on the server side instead.  This dramatically
+    # cuts network traffic and avoids 10-minute timeouts.
+    if mode == "naive":
+        cmd_list.append("--skip_weight_upload")
+
     # Add debug info
     print(f"  Running client: mode={mode}, phase={phase}, port={args.master_port}", flush=True)
     cmd = [
@@ -250,8 +258,16 @@ def _run_client(mode: str, phase: str, args) -> tuple[float, int]:
         f"/usr/bin/time -f %e {shlex.join(cmd_list)} 2>&1",
     ]
 
-    # Set timeout based on mode - local is faster, remote modes may need more time
-    timeout_seconds = 300 if mode == "local" else 600  # 5 or 10 minutes
+    # Timeout heuristics: local runs are quick, remote modes vary.  The naive
+    # baseline (without the optimisation flag) can take >10 min for large
+    # models because it transfers ~12 GB weights multiple times.  Extend its
+    # allowance; other modes remain at 10 min which is usually enough.
+    if mode == "local":
+        timeout_seconds = 300  # 5 min
+    elif mode == "naive":
+        timeout_seconds = 1800  # 30 min safeguard for large uploads
+    else:
+        timeout_seconds = 600  # 10 min for other remote modes
     
     try:
         result = subprocess.run(

@@ -119,7 +119,11 @@ class RemoteWorker:
     ) -> Tuple[torch.Tensor, Any]:
         """Load weights *every call*, run forward, and return logits + KV cache."""
         start = time.time()
-        self.model.load_state_dict(state_dict, strict=False)
+
+        # If the incoming state_dict is empty (client used --skip_weight_upload)
+        # we keep the resident weights and avoid the expensive copy.
+        if state_dict:
+            self.model.load_state_dict(state_dict, strict=False)
         load_t = time.time() - start
 
         input_ids = input_ids.to(self.device, non_blocking=True)
