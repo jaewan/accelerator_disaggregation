@@ -452,7 +452,11 @@ def run_experiment(args):
                         # connection failures when only a single external server is running.
                         base_port = int(args.master_port)
                         mode_offset = {"naive": 0, "remote_cache": 10, "sys_simulated": 20}.get(mode, 30)
-                        run_port = str(base_port + mode_offset)
+                        # Naive baseline uses two separate servers (prefill & decode) to
+                        # avoid TensorPipe connection reuse dead-locks. Decode phase gets
+                        # an extra +5 port offset (29500→29505).
+                        phase_offset = 5 if (mode == "naive" and phase == "decode") else 0
+                        run_port = str(base_port + mode_offset + phase_offset)
 
                         # Use ExitStack for proper resource cleanup
                         with ExitStack() as stack:
