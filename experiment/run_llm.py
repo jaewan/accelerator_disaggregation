@@ -32,6 +32,8 @@ import io
 # on the remote side.
 # ----------------------------------------------------------------------------------
 
+DECODE_STEPS = 50  # number of decode iterations when phase==decode
+
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] %(levelname)s %(message)s",
@@ -142,7 +144,7 @@ def _parse_args(argv: List[str] | None = None):
     parser.add_argument("--mode", required=True, choices=["local", "naive", "remote_cache", "sys_simulated"])
     parser.add_argument("--phase", required=True, choices=["prefill", "decode"])
     parser.add_argument("--model", default="EleutherAI/gpt-j-6B")
-    parser.add_argument("--prompt", default="Hello, my dog is cute and")
+    parser.add_argument("--prompt", default="The quick brown fox jumps over the lazy dog. " * 8)
     parser.add_argument("--gpu_host", default="127.0.0.1")
     parser.add_argument("--master_port", default="29500")
     parser.add_argument("--backend", choices=["gloo", "nccl"], default="gloo")
@@ -266,7 +268,7 @@ def _run_naive_remote(args):
 
     # Call the stateless remote forward. If --skip_weight_upload was set we
     # are sending an empty dict, otherwise the full weights.
-    for _ in range(1 if args.phase == "prefill" else 6):
+    for _ in range(1 if args.phase == "prefill" else DECODE_STEPS):
         logits, kv_cache = _rpc_sync(
             worker_rref,
             rpc_server.RemoteWorker.run_stateless_forward_remote,
@@ -324,7 +326,7 @@ def _run_remote_cache(args):
         print(f"Running decode with handle: {kv_handle}")
         # Start with the next token predicted from the prefill logits.
         next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
-        for i in range(5):
+        for i in range(DECODE_STEPS):
             print(f"Decode step {i+1}…")
             logits = _rpc_sync(
                 worker_rref,
@@ -375,7 +377,7 @@ def _run_sys_simulated(args):
     logits = _decompress_tensor(logits_blob)
 
     if args.phase == "decode":
-        for _ in range(5):
+        for _ in range(DECODE_STEPS):
             next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
             token_blob = _compress_tensor(next_token)
             logits_blob, kv_id = _rpc_sync(

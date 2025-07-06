@@ -302,8 +302,8 @@ def _run_client(mode: str, phase: str, args) -> tuple[float, int, float]:
     # explicitly asked for the real upload we add the optimisation flag to
     # download weights once on the server side instead.  This dramatically
     # cuts network traffic and avoids 10-minute timeouts.
-    if mode == "naive":
-        cmd_list.append("--skip_weight_upload")
+    #if mode == "naive":
+    #    cmd_list.append("--skip_weight_upload")
 
     # Add debug info
     print(f"  Running client: mode={mode}, phase={phase}, port={args.master_port}", flush=True)
@@ -618,7 +618,7 @@ def _parse_args(argv=None):
     p.add_argument("--trials", type=int, default=5)
     p.add_argument("--gpu_host", default="127.0.0.1", help="IP/hostname used by PyTorch RPC to reach the GPU server")
     p.add_argument("--master_port", default="29501")
-    p.add_argument("--model", default="sshleifer/tiny-gpt2")
+    p.add_argument("--model", default="EleutherAI/gpt-j-6B")
     p.add_argument("--output", default="results.csv")
     p.add_argument("--output_dir", default="artefacts", help="Where to store GPU utilization logs")
     p.add_argument("--external_server", action="store_true", help="Assume rpc_server is already running externally")

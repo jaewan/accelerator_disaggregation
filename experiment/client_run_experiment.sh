@@ -18,7 +18,7 @@ set -eu
 ROOT="${ROOT:-$(pwd)}"
 # Hostname/IP used by Torch RPC (must resolve via DNS).  Override if needed.
 GPU_HOST="${GPU_HOST:-10.8.162.218}"
-MODEL="${MODEL:-facebook/opt-125m}"
+MODEL="${MODEL:-EleutherAI/gpt-j-6B}"
 VENV_ACTIVATE="${VENV_ACTIVATE:-venv/bin/activate}"
 
 cd "$ROOT"
