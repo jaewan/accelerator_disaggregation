@@ -101,6 +101,10 @@ class RemoteWorker:
         # For this experiment, we will rely on values returned by the client call.
         return 0
 
+    def get_model_size_remote(self) -> int:
+        """Return total parameter size of the model resident on this worker *in bytes*."""
+        return sum(p.numel() * p.element_size() for p in self.model.parameters())  # type: ignore[attr-defined]
+
     # ------------------------------------------------------------------
     # Helper utilities
     # ------------------------------------------------------------------

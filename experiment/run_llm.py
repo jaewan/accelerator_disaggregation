@@ -207,24 +207,17 @@ def _run_naive_remote(args):
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     
     if args.skip_weight_upload:
-        # In the new model, weights are downloaded directly on the server.
-        # We can call the download method on our remote worker instance.
+        # Download weights once on the server (GPU side).
         _rpc_sync(worker_rref, rpc_server.RemoteWorker.download_weights_remote, args.model)
-        
-        # Create a dummy state_dict for size calculation, as before.
-        import transformers
-        config = transformers.AutoConfig.from_pretrained(args.model)
-        with torch.no_grad():
-            model = transformers.AutoModelForCausalLM.from_config(config)
-        state_dict = model.state_dict()
-        
-        simulated_upload_bytes = sum(v.numel() * v.element_size() for v in state_dict.values())
-        LOGGER.info("Simulated weight upload size: %.2f MB (NOT transferred due to --skip_weight_upload)", simulated_upload_bytes / 1e6)
 
-        # Use an *empty* state_dict for actual RPC calls so we don't send gigabytes
-        # over the wire. The remote worker already downloaded real weights, and
-        # its run_stateless_forward_remote method will skip re-loading when the
-        # dict is empty.
+        # Ask the remote worker for the true model size for logging purposes.
+        size_bytes = _rpc_sync(worker_rref, rpc_server.RemoteWorker.get_model_size_remote)
+        LOGGER.info(
+            "Simulated weight upload size: %.2f MB (NOT transferred due to --skip_weight_upload)",
+            size_bytes / 1e6,
+        )
+
+        # Send an *empty* state_dict so that the remote call skips any re-load.
         state_dict_rpc: dict[str, torch.Tensor] = {}
     else:
         # Load model locally to get state_dict for upload.
@@ -285,15 +278,18 @@ def _run_remote_cache(args):
         )
         
         print(f"Running decode with handle: {kv_handle}")
-        decode_ids = tokenizer("dummy", return_tensors="pt").input_ids
+        # Start with the next token predicted from the prefill logits.
+        next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
         for i in range(5):
-            print(f"Decode step {i+1}...")
+            print(f"Decode step {i+1}…")
             logits = _rpc_sync(
                 worker_rref,
                 rpc_server.RemoteWorker.run_decode_with_handle,
-                decode_ids[:, -1:],
+                next_token,
                 kv_handle,
             )
+            # Select the next token for the following step.
+            next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
         print("Decode complete.")
     else:
         raise ValueError(f"Unknown phase for remote_cache mode: {args.phase}")

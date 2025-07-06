@@ -31,21 +31,15 @@ fi
 ###############################################################################
 # 1) Idempotent patch: give decode phase a separate port to avoid dead-lock.
 ###############################################################################
-if ! grep -q "phase_offset" experiment_driver.py; then
-  echo "Applying port-offset patch to experiment_driver.py …"
-  patch -N -p0 <<'PATCH_EOF'
---- a/experiment_driver.py
-+++ b/experiment_driver.py
-@@
--        base_port = int(args.master_port)
--        mode_offset = {"naive": 0, "remote_cache": 10, "sys_simulated": 20}.get(mode, 30)
--        run_port = str(base_port + mode_offset)
-+        base_port = int(args.master_port)
-+        mode_offset = {"naive": 0, "remote_cache": 10, "sys_simulated": 20}.get(mode, 30)
-+        # Use a different port for the decode phase to avoid TensorPipe dead-lock
-+        phase_offset = 0 if phase == "prefill" else 5
-+        run_port = str(base_port + mode_offset + phase_offset)
-PATCH_EOF
+# Detect if the fix is already present; if not, perform an in-place sed replacement.
+if ! grep -q "phase_offset = 0 if phase == \"prefill\"" experiment_driver.py; then
+  echo "Patching experiment_driver.py to add phase_offset logic…"
+  # Use sed to replace the single-line run_port assignment with the 3-line block.
+  sed -i \
+    -e '/run_port = str(base_port \+ mode_offset)/{' \
+    -e 's//        # Use a different port for the decode phase to avoid TensorPipe dead-lock\n        phase_offset = 0 if phase == "prefill" else 5\n        run_port = str(base_port + mode_offset + phase_offset)/' \
+    -e '}' \
+    experiment_driver.py
 else
   echo "Patch already present – skipping."
 fi

@@ -43,6 +43,8 @@ start_server() {
         --world_size 2 \
         --rank 0 \
         > "logs/${logfile}" 2>&1 &
+  # Save PID for later termination
+  echo $! >> "logs/gpu_server_pids.txt"
 }
 
 # Start servers for all required ports
