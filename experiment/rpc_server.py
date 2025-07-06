@@ -15,7 +15,7 @@ import signal
 import sys
 import time
 import uuid
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, Optional
 import zlib
 import pickle
 import io
@@ -33,8 +33,18 @@ LOGGER = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------------------
-# Remote worker implementation
+# Remote worker implementation (GPU side)
 # --------------------------------------------------------------------------------------
+
+# We keep a *single* model instance in GPU memory for all RemoteWorker
+# objects that may be created by successive client connections within the
+# same server process.  This avoids out-of-memory errors when the naive
+# baseline (which spins up a fresh RemoteWorker every run) is executed
+# multiple times back-to-back.
+
+_GLOBAL_MODEL: Optional[AutoModelForCausalLM] = None
+_GLOBAL_MODEL_DTYPE: Optional[str] = None
+_GLOBAL_WEIGHTS_LOADED: bool = False
 
 class RemoteWorker:
     """Remote side logic that lives on GPU_HOST.
@@ -46,28 +56,41 @@ class RemoteWorker:
     """
 
     def __init__(self, model_name: str = "gpt2", dtype: str = "float16") -> None:
+        global _GLOBAL_MODEL, _GLOBAL_MODEL_DTYPE, _GLOBAL_WEIGHTS_LOADED  # noqa: PLW0603
+
         device = "cuda" if torch.cuda.is_available() else "cpu"
         self.device = torch.device(device)
-        LOGGER.info("Initializing RemoteWorker on %s with model %s", self.device, model_name)
 
-        # Create an *empty* model skeleton first so we can load weights later.
-        config = AutoConfig.from_pretrained(model_name)
-        
-        # Create model and immediately move to device with appropriate dtype
-        with torch.no_grad():  # Disable gradient computation during initialization
-            self.model = AutoModelForCausalLM.from_config(config)
-            
-            # Convert to half precision immediately for large models to save memory
-            if dtype == "float16" and device == "cuda":
-                self.model = self.model.half()
-            elif dtype == "bfloat16" and device == "cuda":
-                self.model = self.model.to(dtype=torch.bfloat16)
-                
-            # Move to device after dtype conversion
-            self.model = self.model.to(self.device)
+        LOGGER.info("Initializing RemoteWorker on %s with model %s (dtype=%s)", self.device, model_name, dtype)
 
-        # Internal bookkeeping for semantic-aware mode
-        self.weights_loaded: bool = False
+        if _GLOBAL_MODEL is None:
+            # No model loaded yet in this process – create a fresh skeleton.
+            config = AutoConfig.from_pretrained(model_name)
+            with torch.no_grad():
+                _GLOBAL_MODEL = AutoModelForCausalLM.from_config(config)
+
+                # Cast to requested dtype *before* moving to device.
+                if dtype == "float16" and device == "cuda":
+                    _GLOBAL_MODEL = _GLOBAL_MODEL.half()  # type: ignore[assignment]
+                elif dtype == "bfloat16" and device == "cuda":
+                    _GLOBAL_MODEL = _GLOBAL_MODEL.to(dtype=torch.bfloat16)  # type: ignore[arg-type, assignment]
+
+                _GLOBAL_MODEL = _GLOBAL_MODEL.to(self.device)  # type: ignore[assignment]
+
+            _GLOBAL_MODEL_DTYPE = dtype
+            _GLOBAL_WEIGHTS_LOADED = False
+            LOGGER.info("Created global model skeleton (first RemoteWorker)")
+        else:
+            # Re-use existing global model.  Optionally warn if dtype mismatch
+            if dtype != _GLOBAL_MODEL_DTYPE:
+                LOGGER.warning("Requested dtype %s but global model dtype is %s; proceeding with global model", dtype, _GLOBAL_MODEL_DTYPE)
+
+        # All RemoteWorker instances share the same model object.
+        assert _GLOBAL_MODEL is not None  # for type checker
+        self.model = _GLOBAL_MODEL  # type: ignore[assignment]
+        self.weights_loaded = _GLOBAL_WEIGHTS_LOADED
+
+        # Each worker has its *own* KV-cache store but shared weights.
         self.kv_cache_store: Dict[str, Any] = {}
         LOGGER.info("RemoteWorker ready (weights_loaded=%s)", self.weights_loaded)
 
@@ -123,14 +146,14 @@ class RemoteWorker:
         # If the incoming state_dict is empty (client used --skip_weight_upload)
         # we keep the resident weights and avoid the expensive copy.
         if state_dict:
-            self.model.load_state_dict(state_dict, strict=False)
+            self.model.load_state_dict(state_dict, strict=False)  # type: ignore[attr-defined]
         load_t = time.time() - start
 
         input_ids = input_ids.to(self.device, non_blocking=True)
         kv_cache = self._move_kv_cache(kv_cache, self.device)
 
         with torch.no_grad():
-            outputs = self.model(input_ids=input_ids, past_key_values=kv_cache, use_cache=True)
+            outputs = self.model(input_ids=input_ids, past_key_values=kv_cache, use_cache=True)  # type: ignore[operator]
 
         logits = outputs.logits.cpu()
         pkv = self._move_kv_cache(outputs.past_key_values, torch.device("cpu"))
@@ -143,31 +166,37 @@ class RemoteWorker:
 
     def load_weights_remote(self, state_dict: Dict[str, torch.Tensor]) -> None:
         """Load weights only once and keep them resident in GPU memory."""
-        if not self.weights_loaded:
-            self.model.load_state_dict(state_dict, strict=False)
+        global _GLOBAL_WEIGHTS_LOADED  # noqa: PLW0603
+
+        if not _GLOBAL_WEIGHTS_LOADED:
+            self.model.load_state_dict(state_dict, strict=False)  # type: ignore[attr-defined]
             self.weights_loaded = True
+            _GLOBAL_WEIGHTS_LOADED = True
             LOGGER.info("Weights loaded (%.2f MB)", sum(v.nbytes for v in state_dict.values()) / 1e6)
         else:
             LOGGER.debug("Weights already loaded; skipping reload.")
 
     def download_weights_remote(self, model_name: str) -> None:
         """Download weights from Hugging Face and keep them resident in GPU memory."""
-        if not self.weights_loaded:
+        global _GLOBAL_WEIGHTS_LOADED  # noqa: PLW0603
+
+        if not _GLOBAL_WEIGHTS_LOADED:
             LOGGER.info("Downloading weights for model %s", model_name)
-            full_model = AutoModelForCausalLM.from_pretrained(model_name)
+            full_model = AutoModelForCausalLM.from_pretrained(model_name)  # type: ignore[call-arg]
             
             # Convert to the same dtype as our model
-            if self.model.dtype == torch.float16:
-                full_model = full_model.half()
-            elif self.model.dtype == torch.bfloat16:
+            if getattr(self.model, "dtype", torch.float32) == torch.float16:  # type: ignore[attr-defined]
+                full_model = full_model.half()  # type: ignore[attr-defined]
+            elif getattr(self.model, "dtype", torch.float32) == torch.bfloat16:  # type: ignore[attr-defined]
                 full_model = full_model.to(dtype=torch.bfloat16)
             
             # Load the weights into our model
-            self.model.load_state_dict(full_model.state_dict(), strict=False)
+            self.model.load_state_dict(full_model.state_dict(), strict=False)  # type: ignore[attr-defined]
             self.weights_loaded = True
+            _GLOBAL_WEIGHTS_LOADED = True
             
             # Calculate size for logging
-            total_size = sum(p.numel() * p.element_size() for p in self.model.parameters()) / 1e6
+            total_size = sum(p.numel() * p.element_size() for p in self.model.parameters()) / 1e6  # type: ignore[attr-defined]
             LOGGER.info("Weights downloaded and loaded (%.2f MB)", total_size)
         else:
             LOGGER.debug("Weights already loaded; skipping download.")
@@ -180,7 +209,7 @@ class RemoteWorker:
     def run_prefill_remote(self, token_ids: torch.Tensor):
         token_ids = token_ids.to(self.device, non_blocking=True)
         with torch.no_grad():
-            outputs = self.model(input_ids=token_ids, use_cache=True)
+            outputs = self.model(input_ids=token_ids, use_cache=True)  # type: ignore[operator]
         logits = outputs.logits.cpu()
         kv_cache_id = str(uuid.uuid4())
         self.kv_cache_store[kv_cache_id] = self._move_kv_cache(outputs.past_key_values, torch.device("cpu"))
@@ -194,7 +223,7 @@ class RemoteWorker:
         kv_cache = self._move_kv_cache(self.kv_cache_store[kv_cache_id], self.device)
 
         with torch.no_grad():
-            outputs = self.model(input_ids=token_id, past_key_values=kv_cache, use_cache=True)
+            outputs = self.model(input_ids=token_id, past_key_values=kv_cache, use_cache=True)  # type: ignore[operator]
         logits = outputs.logits.cpu()
         # Update stored cache on CPU to minimise GPU memory footprint between calls.
         self.kv_cache_store[kv_cache_id] = self._move_kv_cache(outputs.past_key_values, torch.device("cpu"))
@@ -204,7 +233,7 @@ class RemoteWorker:
         """Realistic semantic-blind caching: KV cache stays resident remotely."""
         input_ids = input_ids.to(self.device, non_blocking=True)
         with torch.no_grad():
-            outputs = self.model(input_ids=input_ids, use_cache=True)
+            outputs = self.model(input_ids=input_ids, use_cache=True)  # type: ignore[operator]
         logits = outputs.logits.cpu()
         kv_handle = str(uuid.uuid4())
         # Keep KV cache on GPU for realistic semantic-blind caching baseline
@@ -216,7 +245,7 @@ class RemoteWorker:
         """Run prefill and return actual KV cache tensors (for remote cache baseline)."""
         token_ids = token_ids.to(self.device, non_blocking=True)
         with torch.no_grad():
-            outputs = self.model(input_ids=token_ids, use_cache=True)
+            outputs = self.model(input_ids=token_ids, use_cache=True)  # type: ignore[operator]
         logits = outputs.logits.cpu()
         kv_cache = self._move_kv_cache(outputs.past_key_values, torch.device("cpu"))
         LOGGER.debug("Prefill with cache complete; returning actual KV cache tensors")
@@ -230,7 +259,7 @@ class RemoteWorker:
         kv_cache = self.kv_cache_store[kv_handle]  # Already on GPU, no transfer needed
 
         with torch.no_grad():
-            outputs = self.model(input_ids=token_id, past_key_values=kv_cache, use_cache=True)
+            outputs = self.model(input_ids=token_id, past_key_values=kv_cache, use_cache=True)  # type: ignore[operator]
         logits = outputs.logits.cpu()
         # Update KV cache on GPU - stays resident remotely
         self.kv_cache_store[kv_handle] = outputs.past_key_values
@@ -243,7 +272,7 @@ class RemoteWorker:
         kv_cache = self._move_kv_cache(kv_cache, self.device)
 
         with torch.no_grad():
-            outputs = self.model(input_ids=token_id, past_key_values=kv_cache, use_cache=True)
+            outputs = self.model(input_ids=token_id, past_key_values=kv_cache, use_cache=True)  # type: ignore[operator]
         logits = outputs.logits.cpu()
         updated_kv_cache = self._move_kv_cache(outputs.past_key_values, torch.device("cpu"))
         return logits, updated_kv_cache
@@ -268,7 +297,7 @@ class RemoteWorker:
         token_ids = token_ids.to(self.device, non_blocking=True)
 
         with torch.no_grad():
-            outputs = self.model(input_ids=token_ids, use_cache=True)
+            outputs = self.model(input_ids=token_ids, use_cache=True)  # type: ignore[operator]
 
         logits = outputs.logits.cpu()
         logits_blob = self._compress_tensor(logits)
@@ -290,7 +319,7 @@ class RemoteWorker:
         kv_cache = self._move_kv_cache(self.kv_cache_store[kv_cache_id], self.device)
 
         with torch.no_grad():
-            outputs = self.model(input_ids=token_id, past_key_values=kv_cache, use_cache=True)
+            outputs = self.model(input_ids=token_id, past_key_values=kv_cache, use_cache=True)  # type: ignore[operator]
 
         logits = outputs.logits.cpu()
         logits_blob = self._compress_tensor(logits)
