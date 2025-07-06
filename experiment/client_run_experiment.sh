@@ -17,9 +17,7 @@ set -eu
 
 ROOT="${ROOT:-$(pwd)}"
 # Hostname/IP used by Torch RPC (must resolve via DNS).  Override if needed.
-GPU_HOST="${GPU_HOST:-GCRAZGDL4024.westus3.cloudapp.azure.com}"
-# SSH alias or hostname for scp/ssh; defaults to 'gpu' from your ssh config.
-SSH_HOST="${SSH_HOST:-gpu}"
+GPU_HOST="${GPU_HOST:-10.8.162.218}"
 MODEL="${MODEL:-facebook/opt-125m}"
 VENV_ACTIVATE="${VENV_ACTIVATE:-venv/bin/activate}"
 
@@ -40,7 +38,6 @@ fi
 python experiment_driver.py \
        --trials 5 \
        --gpu_host "$GPU_HOST" \
-       --ssh_host "$SSH_HOST" \
        --master_port 29500 \
        --model "$MODEL" \
        --modes naive,remote_cache,sys_simulated \

@@ -584,7 +584,6 @@ def _parse_args(argv=None):
     p = argparse.ArgumentParser(description="Semantic gap experiment driver")
     p.add_argument("--trials", type=int, default=5)
     p.add_argument("--gpu_host", default="127.0.0.1", help="IP/hostname used by PyTorch RPC to reach the GPU server")
-    p.add_argument("--ssh_host", help="SSH alias/hostname for GPU server (if different from --gpu_host)")
     p.add_argument("--master_port", default="29501")
     p.add_argument("--model", default="sshleifer/tiny-gpt2")
     p.add_argument("--output", default="results.csv")
@@ -599,8 +598,4 @@ def _parse_args(argv=None):
 
 
 if __name__ == "__main__":
-    args = _parse_args()
-    # If ssh_host not provided default to gpu_host
-    if not getattr(args, "ssh_host", None):
-        args.ssh_host = args.gpu_host
-    run_experiment(args)
+    run_experiment(_parse_args())
