@@ -99,10 +99,21 @@ def _collect_net_bytes() -> int:
     if callable(agent_getter):
         try:
             metrics = agent_getter().get_metrics()  # type: ignore[attr-defined]
-            # Some torch builds return str values; best-effort cast to int.
-            sent = int(metrics.get("rpc.agent.sent_bytes", 0))  # type: ignore[arg-type]
-            recv = int(metrics.get("rpc.agent.received_bytes", 0))  # type: ignore[arg-type]
-            return sent + recv
+
+            # PyTorch versions label byte counters differently.  We therefore
+            # sum *all* metric values whose key includes the substring
+            # "bytes" (case-insensitive).  This remains correct even if new
+            # counters are added in future versions.
+
+            total = 0
+            for k, v in metrics.items():  # type: ignore[assignment]
+                if "bytes" in k.lower():
+                    try:
+                        total += int(v)
+                    except (ValueError, TypeError):
+                        continue
+            if total > 0:
+                return total
         except Exception:  # pragma: no cover – best-effort only
             pass
 

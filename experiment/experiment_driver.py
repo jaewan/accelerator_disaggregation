@@ -190,10 +190,42 @@ def _start_rpc_server(model: str, master_addr: str, master_port: str) -> Process
         raise
 
 
-def _start_dmon(csv_path: Path) -> ProcessHandle:
-    cmd = ["nvidia-smi", "dmon", "-s", "u", "-i", "0", "-f", str(csv_path)]
+def _start_dmon(csv_path: Path, gpu_host: str) -> ProcessHandle:
+    """Launch nvidia-smi dmon locally or via SSH depending on *gpu_host*.
+
+    If *gpu_host* refers to the local machine (127.0.0.1/localhost) we spawn
+    dmon directly. Otherwise we SSH into the remote host and start it there.
+    In the remote case the returned ProcessHandle carries two extra
+    attributes:
+
+    _remote_csv (str)   – path of the CSV on the GPU host
+    _gpu_host   (str)   – hostname/IP used for scp retrieval later
+    """
+
+    if gpu_host in {"127.0.0.1", "localhost"}:
+        cmd = ["nvidia-smi", "dmon", "-s", "u", "-i", "0", "-f", str(csv_path)]
+        popen = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return ProcessHandle(popen)
+
+    # Remote GPU host – write to /tmp and fetch later via scp
+    remote_csv = f"/tmp/{csv_path.name}"
+    cmd = [
+        "ssh",
+        gpu_host,
+        "nvidia-smi",
+        "dmon",
+        "-s",
+        "u",
+        "-i",
+        "0",
+        "-f",
+        remote_csv,
+    ]
     popen = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    return ProcessHandle(popen)
+    handle = ProcessHandle(popen)
+    setattr(handle, "_remote_csv", remote_csv)
+    setattr(handle, "_gpu_host", gpu_host)
+    return handle
 
 
 def _start_tcpdump(nic: str, pcap_path: Path) -> ProcessHandle:
@@ -402,7 +434,7 @@ def run_experiment(args):
                             with ExitStack() as stack:
                                 for attempt in range(2):
                                     # Start GPU monitoring and allow it to collect at least one sample
-                                    dmon_proc = _start_dmon(dmon_csv)
+                                    dmon_proc = _start_dmon(dmon_csv, args.gpu_host)
                                     stack.callback(dmon_proc.terminate)
                                     time.sleep(0.5)
 
@@ -419,6 +451,16 @@ def run_experiment(args):
 
                                         # Stop GPU monitoring before checking results
                                         dmon_proc.terminate()
+
+                                        # If dmon ran on a remote host, copy CSV back
+                                        remote_csv = getattr(dmon_proc, "_remote_csv", None)
+                                        remote_host = getattr(dmon_proc, "_gpu_host", None)
+                                        if remote_csv and remote_host:
+                                            subprocess.run([
+                                                "scp",
+                                                f"{remote_host}:{remote_csv}",
+                                                str(dmon_csv),
+                                            ], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
                                         # Verify CSV has sufficient data rows; retry once if not
                                         if _csv_data_rows(dmon_csv) < 2 and attempt == 0:
@@ -480,7 +522,7 @@ def run_experiment(args):
                         with ExitStack() as stack:
                             for attempt in range(2):
                                 # Start GPU monitoring and allow it to collect at least one sample
-                                dmon_proc = _start_dmon(dmon_csv)
+                                dmon_proc = _start_dmon(dmon_csv, args.gpu_host)
                                 stack.callback(dmon_proc.terminate)
                                 time.sleep(0.5)
 
@@ -497,6 +539,16 @@ def run_experiment(args):
 
                                     # Stop GPU monitoring before checking results
                                     dmon_proc.terminate()
+
+                                    # If dmon ran on a remote host, copy CSV back
+                                    remote_csv = getattr(dmon_proc, "_remote_csv", None)
+                                    remote_host = getattr(dmon_proc, "_gpu_host", None)
+                                    if remote_csv and remote_host:
+                                        subprocess.run([
+                                            "scp",
+                                            f"{remote_host}:{remote_csv}",
+                                            str(dmon_csv),
+                                        ], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
                                     # Verify CSV has sufficient data rows; retry once if not
                                     if _csv_data_rows(dmon_csv) < 2 and attempt == 0:
