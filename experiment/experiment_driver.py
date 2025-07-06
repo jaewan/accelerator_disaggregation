@@ -266,7 +266,7 @@ def _average_sm_util(csv_path: Path) -> float:
         return 0.0
 
 
-def _run_client(mode: str, phase: str, args) -> tuple[float, int]:
+def _run_client(mode: str, phase: str, args) -> tuple[float, int, float]:
     """Run client once, return (latency_seconds, network_bytes)."""
     cmd_list = [
         sys.executable,
@@ -322,14 +322,19 @@ def _run_client(mode: str, phase: str, args) -> tuple[float, int]:
         lines = result.stdout.strip().split("\n")
         latency_sec = float(lines[-1])
         
-        # Find network bytes in output
+        # Find network bytes and avg_sm in output
         network_bytes = 0
+        avg_sm = 0.0
         for line in lines:
             if line.startswith("NETWORK_BYTES:"):
                 network_bytes = int(line.split(":", 1)[1].strip())
-                break
+            elif line.startswith("AVG_SM_UTIL:"):
+                try:
+                    avg_sm = float(line.split(":", 1)[1].strip().rstrip("%"))
+                except ValueError:
+                    pass
         
-        return latency_sec, network_bytes
+        return latency_sec, network_bytes, avg_sm
         
     except subprocess.TimeoutExpired as e:
         print(f"\nERROR: Client script for mode='{mode}' phase='{phase}' timed out after {timeout_seconds}s.", file=sys.stderr)
@@ -433,10 +438,7 @@ def run_experiment(args):
                             # Use ExitStack for proper resource cleanup
                             with ExitStack() as stack:
                                 for attempt in range(2):
-                                    # Start GPU monitoring and allow it to collect at least one sample
-                                    dmon_proc = _start_dmon(dmon_csv, args.ssh_host)
-                                    stack.callback(dmon_proc.terminate)
-                                    time.sleep(0.5)
+                                    # GPU monitoring is handled inside the RPC server; no local dmon.
 
                                     try:
                                         # Prepare per-run args with dynamic port
@@ -446,29 +448,23 @@ def run_experiment(args):
 
                                         # Run client and measure latency + network bytes
                                         start_ts = time.time()
-                                        latency_sec, net_bytes = _run_client(mode, phase, client_args)
+                                        latency_sec, net_bytes, avg_sm = _run_client(mode, phase, client_args)
                                         run_wall = time.time() - start_ts
 
                                         # Stop GPU monitoring before checking results
-                                        dmon_proc.terminate()
+                                        # dmon_proc.terminate() # This line is removed
 
                                         # If dmon ran on a remote host, copy CSV back
-                                        remote_csv = getattr(dmon_proc, "_remote_csv", None)
-                                        remote_host = getattr(dmon_proc, "_gpu_host", None)
-                                        if remote_csv and remote_host:
-                                            subprocess.run([
-                                                "scp",
-                                                f"{remote_host}:{remote_csv}",
-                                                str(dmon_csv),
-                                            ], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                        # remote_csv = getattr(dmon_proc, "_remote_csv", None) # This line is removed
+                                        # remote_host = getattr(dmon_proc, "_gpu_host", None) # This line is removed
+                                        # if remote_csv and remote_host: # This line is removed
+                                        #     subprocess.run([ # This line is removed
+                                        #         "scp", # This line is removed
+                                        #         f"{remote_host}:{remote_csv}", # This line is removed
+                                        #         str(dmon_csv), # This line is removed
+                                        #     ], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) # This line is removed
 
-                                        # Verify CSV has sufficient data rows; retry once if not
-                                        if _csv_data_rows(dmon_csv) < 2 and attempt == 0:
-                                            print(f"Warning: dmon log too short for {mode_label} {phase}; retrying…")
-                                            continue  # retry the attempt
-
-                                        # Collect GPU utilization
-                                        avg_sm = _average_sm_util(dmon_csv)
+                                        # avg_sm already returned by client
 
                                         results.append({
                                             "trial": trial,
@@ -521,10 +517,7 @@ def run_experiment(args):
                         # Use ExitStack for proper resource cleanup
                         with ExitStack() as stack:
                             for attempt in range(2):
-                                # Start GPU monitoring and allow it to collect at least one sample
-                                dmon_proc = _start_dmon(dmon_csv, args.ssh_host)
-                                stack.callback(dmon_proc.terminate)
-                                time.sleep(0.5)
+                                # GPU monitoring is handled inside the RPC server; no local dmon.
 
                                 try:
                                     # Prepare per-run args with dynamic port
@@ -534,29 +527,23 @@ def run_experiment(args):
 
                                     # Run client and measure latency + network bytes
                                     start_ts = time.time()
-                                    latency_sec, net_bytes = _run_client(mode, phase, client_args)
+                                    latency_sec, net_bytes, avg_sm = _run_client(mode, phase, client_args)
                                     run_wall = time.time() - start_ts
 
                                     # Stop GPU monitoring before checking results
-                                    dmon_proc.terminate()
+                                    # dmon_proc.terminate() # This line is removed
 
                                     # If dmon ran on a remote host, copy CSV back
-                                    remote_csv = getattr(dmon_proc, "_remote_csv", None)
-                                    remote_host = getattr(dmon_proc, "_gpu_host", None)
-                                    if remote_csv and remote_host:
-                                        subprocess.run([
-                                            "scp",
-                                            f"{remote_host}:{remote_csv}",
-                                            str(dmon_csv),
-                                        ], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                    # remote_csv = getattr(dmon_proc, "_remote_csv", None) # This line is removed
+                                    # remote_host = getattr(dmon_proc, "_gpu_host", None) # This line is removed
+                                    # if remote_csv and remote_host: # This line is removed
+                                    #     subprocess.run([ # This line is removed
+                                    #         "scp", # This line is removed
+                                    #         f"{remote_host}:{remote_csv}", # This line is removed
+                                    #         str(dmon_csv), # This line is removed
+                                    #     ], check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) # This line is removed
 
-                                    # Verify CSV has sufficient data rows; retry once if not
-                                    if _csv_data_rows(dmon_csv) < 2 and attempt == 0:
-                                        print(f"Warning: dmon log too short for {mode_label} {phase}; retrying…")
-                                        continue  # retry the attempt
-
-                                    # Collect GPU utilization
-                                    avg_sm = _average_sm_util(dmon_csv)
+                                    # avg_sm already returned by client
 
                                     results.append({
                                         "trial": trial,

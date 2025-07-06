@@ -23,6 +23,8 @@ import io
 import torch  # type: ignore
 from torch.distributed import rpc  # type: ignore
 from transformers import AutoConfig, AutoModelForCausalLM  # type: ignore
+import subprocess
+from pathlib import Path
 
 logging.basicConfig(
     level=logging.INFO,
@@ -93,6 +95,84 @@ class RemoteWorker:
         # Each worker has its *own* KV-cache store but shared weights.
         self.kv_cache_store: Dict[str, Any] = {}
         LOGGER.info("RemoteWorker ready (weights_loaded=%s)", self.weights_loaded)
+
+        # GPU monitoring state
+        self._gpu_mon_proc: Optional[subprocess.Popen] = None
+        self._dmon_csv: Optional[str] = None
+
+    # ------------------------------------------------------------------
+    # GPU monitoring utilities (started/stopped by the client via RPC)
+    # ------------------------------------------------------------------
+
+    def start_gpu_monitor_remote(self):
+        """Start nvidia-smi dmon on the GPU host (no-op if already running)."""
+        if self._gpu_mon_proc is not None:
+            LOGGER.debug("GPU monitor already running; skipping start.")
+            return
+
+        self._dmon_csv = f"/tmp/dmon_{uuid.uuid4().hex}.csv"
+        cmd = [
+            "nvidia-smi",
+            "dmon",
+            "-s",
+            "u",
+            "-i",
+            "0",
+            "-f",
+            self._dmon_csv,
+        ]
+        try:
+            self._gpu_mon_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            LOGGER.debug("Started GPU monitor: %s", cmd)
+        except FileNotFoundError:
+            LOGGER.warning("nvidia-smi not found – GPU utilisation will be 0%%")
+            self._gpu_mon_proc = None
+
+    def _parse_dmon_csv(self, path: str) -> float:
+        """Return average SM utilisation from a dmon CSV file."""
+        try:
+            sm_total = 0.0
+            rows = 0
+            with Path(path).open() as f:
+                for line in f:
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    parts = line.split()
+                    sm_val = parts[-1] if parts else None
+                    if sm_val and sm_val.isdigit():
+                        sm_total += float(sm_val)
+                        rows += 1
+            return sm_total / rows if rows else 0.0
+        except Exception as exc:  # pragma: no cover – best effort
+            LOGGER.warning("Failed to parse dmon CSV %s: %s", path, exc)
+            return 0.0
+
+    def stop_gpu_monitor_remote(self) -> float:
+        """Terminate dmon and return average SM utilisation (%%)."""
+        if self._gpu_mon_proc is None:
+            LOGGER.debug("GPU monitor not running; returning 0%% util")
+            return 0.0
+
+        # Terminate and wait briefly
+        self._gpu_mon_proc.terminate()
+        try:
+            self._gpu_mon_proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            self._gpu_mon_proc.kill()
+            self._gpu_mon_proc.wait()
+
+        self._gpu_mon_proc = None
+
+        util = 0.0
+        if self._dmon_csv:
+            util = self._parse_dmon_csv(self._dmon_csv)
+            try:
+                Path(self._dmon_csv).unlink(missing_ok=True)
+            except Exception:
+                pass
+        LOGGER.debug("GPU monitor stopped; avg SM util=%.2f%%", util)
+        return util
 
     def get_rpc_bytes(self) -> int:
         """Return total bytes (sent + received) from the RPC agent."""

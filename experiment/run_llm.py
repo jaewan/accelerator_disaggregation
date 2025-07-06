@@ -228,6 +228,7 @@ def _run_local(args):
                 outputs = model(input_ids=next_token, past_key_values=kv_cache, use_cache=True)
                 kv_cache = outputs.past_key_values
     print("NETWORK_BYTES: 0")
+    print("AVG_SM_UTIL: 0.0")
 
 def _run_naive_remote(args):
     _init_rpc(args)
@@ -235,6 +236,9 @@ def _run_naive_remote(args):
 
     # Create a remote reference to a new RemoteWorker instance on the server.
     worker_rref = rpc.remote("GPU_WORKER", rpc_server.RemoteWorker, args=(args.model,))
+
+    # Start GPU monitoring remotely
+    _rpc_sync(worker_rref, rpc_server.RemoteWorker.start_gpu_monitor_remote)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     
@@ -272,7 +276,10 @@ def _run_naive_remote(args):
     # Get network bytes directly from the agent's metrics.
     net_bytes = _collect_net_bytes()
     
+    avg_sm = _rpc_sync(worker_rref, rpc_server.RemoteWorker.stop_gpu_monitor_remote)
+
     print(f"NETWORK_BYTES: {net_bytes}")
+    print(f"AVG_SM_UTIL: {avg_sm}")
     _shutdown_rpc()
 
 def _run_remote_cache(args):
@@ -285,6 +292,9 @@ def _run_remote_cache(args):
     # Explicitly download weights on the remote worker.
     _rpc_sync(worker_rref, rpc_server.RemoteWorker.download_weights_remote, args.model)
     
+    # Start GPU monitoring remotely
+    _rpc_sync(worker_rref, rpc_server.RemoteWorker.start_gpu_monitor_remote)
+
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     
     if args.phase == "prefill":
@@ -328,7 +338,10 @@ def _run_remote_cache(args):
 
     net_bytes = _collect_net_bytes()
     
+    avg_sm = _rpc_sync(worker_rref, rpc_server.RemoteWorker.stop_gpu_monitor_remote)
+
     print(f"NETWORK_BYTES: {net_bytes}")
+    print(f"AVG_SM_UTIL: {avg_sm}")
     _shutdown_rpc()
 
 
@@ -343,6 +356,9 @@ def _run_sys_simulated(args):
     worker_rref = rpc.remote("GPU_WORKER", rpc_server.RemoteWorker, args=(args.model,))
     # Explicitly download weights on the remote worker.
     _rpc_sync(worker_rref, rpc_server.RemoteWorker.download_weights_remote, args.model)
+
+    # Start GPU monitoring remotely
+    _rpc_sync(worker_rref, rpc_server.RemoteWorker.start_gpu_monitor_remote)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
     input_ids = tokenizer(args.prompt, return_tensors="pt").input_ids
@@ -370,7 +386,10 @@ def _run_sys_simulated(args):
 
     net_bytes = _collect_net_bytes()
     
+    avg_sm = _rpc_sync(worker_rref, rpc_server.RemoteWorker.stop_gpu_monitor_remote)
+
     print(f"NETWORK_BYTES: {net_bytes}")
+    print(f"AVG_SM_UTIL: {avg_sm}")
     _shutdown_rpc()
     print(f"COMPRESS_MS: {_COMPRESS_MS:.2f}")
 
