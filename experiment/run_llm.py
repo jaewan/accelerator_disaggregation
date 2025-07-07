@@ -282,6 +282,12 @@ def _run_naive_remote(args):
     
     avg_sm = _rpc_sync(worker_rref, rpc_server.RemoteWorker.stop_gpu_monitor_remote)
 
+    # IMPORTANT: clear any per-run KV caches so that subsequent trials do not
+    # accumulate GPU memory and so that the RemoteWorker can be reused safely
+    # across multiple independent RPC client connections within the same
+    # long-running server process.
+    _rpc_sync(worker_rref, rpc_server.RemoteWorker.reset_state_remote)
+
     print(f"NETWORK_BYTES: {net_bytes}")
     print(f"AVG_SM_UTIL: {avg_sm}")
     _shutdown_rpc()
@@ -344,6 +350,12 @@ def _run_remote_cache(args):
     
     avg_sm = _rpc_sync(worker_rref, rpc_server.RemoteWorker.stop_gpu_monitor_remote)
 
+    # IMPORTANT: clear any per-run KV caches so that subsequent trials do not
+    # accumulate GPU memory and so that the RemoteWorker can be reused safely
+    # across multiple independent RPC client connections within the same
+    # long-running server process.
+    _rpc_sync(worker_rref, rpc_server.RemoteWorker.reset_state_remote)
+
     print(f"NETWORK_BYTES: {net_bytes}")
     print(f"AVG_SM_UTIL: {avg_sm}")
     _shutdown_rpc()
@@ -391,6 +403,12 @@ def _run_sys_simulated(args):
     net_bytes = _collect_net_bytes()
     
     avg_sm = _rpc_sync(worker_rref, rpc_server.RemoteWorker.stop_gpu_monitor_remote)
+
+    # IMPORTANT: clear any per-run KV caches so that subsequent trials do not
+    # accumulate GPU memory and so that the RemoteWorker can be reused safely
+    # across multiple independent RPC client connections within the same
+    # long-running server process.
+    _rpc_sync(worker_rref, rpc_server.RemoteWorker.reset_state_remote)
 
     print(f"NETWORK_BYTES: {net_bytes}")
     print(f"AVG_SM_UTIL: {avg_sm}")

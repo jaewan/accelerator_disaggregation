@@ -299,11 +299,13 @@ def _run_client(mode: str, phase: str, args) -> tuple[float, int, float]:
 
     # Naive baseline uploads full model weights every call which can be
     # prohibitively slow for large models (e.g. GPT-J).  When the user hasn't
-    # explicitly asked for the real upload we add the optimisation flag to
-    # download weights once on the server side instead.  This dramatically
-    # cuts network traffic and avoids 10-minute timeouts.
-    #if mode == "naive":
-    #    cmd_list.append("--skip_weight_upload")
+    # explicitly asked for the real upload we add the optimisation flag so
+    # weights are downloaded *once* on the server and cached for subsequent
+    # runs.  Disable by setting the environment variable
+    #   NO_SKIP_WEIGHT_UPLOAD=1
+    # before running the driver.
+    if mode == "naive" and not os.environ.get("NO_SKIP_WEIGHT_UPLOAD"):
+        cmd_list.append("--skip_weight_upload")
 
     # Add debug info
     print(f"  Running client: mode={mode}, phase={phase}, port={args.master_port}", flush=True)
