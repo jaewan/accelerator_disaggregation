@@ -40,6 +40,7 @@ python experiment_driver.py \
        --gpu_host "$GPU_HOST" \
        --master_port 29500 \
        --model "$MODEL" \
+       --trial_port_stride 0 \
        --modes naive,remote_cache,sys_simulated \
        --external_server \
        --output stage2_results.csv

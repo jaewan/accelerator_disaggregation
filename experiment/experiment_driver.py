@@ -531,7 +531,7 @@ def run_experiment(args):
                         # This is primarily needed for the naïve baseline which is prone to
                         # Gloo/TensorPipe stale-socket dead-locks, but we apply it to every
                         # mode for consistency.
-                        TRIAL_PORT_STRIDE = 50
+                        TRIAL_PORT_STRIDE = args.trial_port_stride
                         trial_offset = (trial - 1) * TRIAL_PORT_STRIDE
 
                         # Separate port for every decode phase (avoid stale sockets *within* a trial)
@@ -621,6 +621,12 @@ def _parse_args(argv=None):
     p.add_argument("--model", default="EleutherAI/gpt-j-6B")
     p.add_argument("--output", default="results.csv")
     p.add_argument("--output_dir", default="artefacts", help="Where to store GPU utilization logs")
+    p.add_argument(
+        "--trial_port_stride",
+        type=int,
+        default=50,
+        help="Port offset between trials when --external_server is used (set to 0 to reuse the same ports across trials)",
+    )
     p.add_argument("--external_server", action="store_true", help="Assume rpc_server is already running externally")
     p.add_argument(
         "--modes",

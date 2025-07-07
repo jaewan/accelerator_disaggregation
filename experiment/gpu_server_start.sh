@@ -60,8 +60,8 @@ start_server() {
   echo $! >> "logs/gpu_server_pids.txt"
 }
 
-# How many trials worth of servers to launch (default 5, override with TRIALS=n)
-TRIALS="${TRIALS:-5}"
+# How many trials worth of servers to launch (default 1, override with TRIALS=n)
+TRIALS="${TRIALS:-1}"
 PORT_STRIDE=50  # Must match value in experiment_driver.py
 
 # Base port mapping (prefill / decode)
