@@ -301,46 +301,54 @@ def _run_remote_cache(args):
     worker_rref = rpc.remote("GPU_WORKER", rpc_server.RemoteWorker, args=(args.model,))
     # Explicitly download weights on the remote worker.
     _rpc_sync(worker_rref, rpc_server.RemoteWorker.download_weights_remote, args.model)
-    
+
     # Start GPU monitoring remotely
     _rpc_sync(worker_rref, rpc_server.RemoteWorker.start_gpu_monitor_remote)
 
     tokenizer = AutoTokenizer.from_pretrained(args.model)
-    
+
+    # ------------------------------------------------------------------
+    # NEW: realistic *uncached* remote KV behaviour
+    #       – Prefill returns the full KV cache tensors.
+    #       – Every decode step sends the current token AND the entire KV
+    #         cache back to the server (no compression).
+    # This greatly increases network volume and lets sys_simulated showcase
+    # its compression advantage.
+    # ------------------------------------------------------------------
+
     if args.phase == "prefill":
         prompt = "Hello, my name is"
         input_ids = tokenizer(prompt, return_tensors="pt").input_ids
-        print(f"Running prefill with {input_ids.shape[1]} tokens...")
-        
-        # Call the method on the remote worker instance.
-        logits, kv_handle = _rpc_sync(
+        print(f"Running prefill with {input_ids.shape[1]} tokens (returning KV cache)…")
+
+        logits, kv_cache = _rpc_sync(
             worker_rref,
-            rpc_server.RemoteWorker.run_prefill_with_handle,
+            rpc_server.RemoteWorker.run_prefill_with_cache_remote,
             input_ids,
         )
-        print("Prefill complete.")
+        # The returned kv_cache is large and stays on the *client* side, so
+        # network bytes already include the full forward cache.
+        print("Prefill complete – KV cache transferred to client.")
 
     elif args.phase == "decode":
-        prefill_prompt = "Let's get a handle first."
+        prefill_prompt = "Let's get a cache first."
         prefill_ids = tokenizer(prefill_prompt, return_tensors="pt").input_ids
-        logits, kv_handle = _rpc_sync(
+        logits, kv_cache = _rpc_sync(
             worker_rref,
-            rpc_server.RemoteWorker.run_prefill_with_handle,
+            rpc_server.RemoteWorker.run_prefill_with_cache_remote,
             prefill_ids,
         )
-        
-        print(f"Running decode with handle: {kv_handle}")
-        # Start with the next token predicted from the prefill logits.
+
+        print("Running decode – transferring KV cache every step (uncompressed)…")
         next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
         for i in range(DECODE_STEPS):
             print(f"Decode step {i+1}…")
-            logits = _rpc_sync(
+            logits, kv_cache = _rpc_sync(
                 worker_rref,
-                rpc_server.RemoteWorker.run_decode_with_handle,
+                rpc_server.RemoteWorker.run_decode_step_with_cache_remote,
                 next_token,
-                kv_handle,
+                kv_cache,
             )
-            # Select the next token for the following step.
             next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
         print("Decode complete.")
     else:

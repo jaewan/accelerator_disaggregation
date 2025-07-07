@@ -228,15 +228,21 @@ def _start_dmon(csv_path: Path, gpu_host: str) -> ProcessHandle:
     return handle
 
 
-def _start_tcpdump(nic: str, pcap_path: Path) -> ProcessHandle:
-    """Start tcpdump to capture network traffic. DEPRECATED - using source code instrumentation instead."""
-    # This function is no longer used but kept for compatibility
-    # Do *not* hard-code sudo here – users can either run the experiment under
-    # sudo or grant `cap_net_admin,cap_net_raw` to the tcpdump binary once via
+def _start_tcpdump(nic: str, pcap_path: Path, host_filter: str | None = None) -> ProcessHandle:
+    """Start tcpdump to capture traffic. If *host_filter* is provided, only
+    packets to/from that IPv4/hostname are captured which prevents unrelated
+    background traffic from inflating the byte count.
+    """
+
+    # Build tcpdump command.  We intentionally avoid sudo so the virtual env
+    # remains active; grant the binary NET_CAP capabilities once instead:
     #   sudo setcap cap_net_admin,cap_net_raw=eip $(command -v tcpdump)
-    # Running without sudo preserves the Python virtual-env for all child
-    # processes (important so run_llm.py finds the torch package).
-    cmd = ["tcpdump", "-i", nic, "-w", str(pcap_path)]
+
+    cmd = ["tcpdump", "-i", nic]
+    if host_filter and host_filter not in {"127.0.0.1", "localhost"}:
+        cmd += ["host", host_filter]
+    cmd += ["-w", str(pcap_path)]
+
     popen = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return ProcessHandle(popen)
 
@@ -464,7 +470,7 @@ def run_experiment(args):
 
                                         # Start tcpdump capture (requires sudo privileges)
                                         pcap_path = artefact_prefix.with_suffix(".pcap")
-                                        tcpdump_proc = _start_tcpdump("eth0", pcap_path)
+                                        tcpdump_proc = _start_tcpdump("eth0", pcap_path, args.gpu_host)
 
                                         try:
                                             # Run client and measure latency
@@ -554,7 +560,7 @@ def run_experiment(args):
 
                                     # Start tcpdump capture
                                     pcap_path = artefact_prefix.with_suffix(".pcap")
-                                    tcpdump_proc = _start_tcpdump("eth0", pcap_path)
+                                    tcpdump_proc = _start_tcpdump("eth0", pcap_path, args.gpu_host)
 
                                     try:
                                         start_ts = time.time()
@@ -617,7 +623,7 @@ def run_experiment(args):
 
 def _parse_args(argv=None):
     p = argparse.ArgumentParser(description="Semantic gap experiment driver")
-    p.add_argument("--trials", type=int, default=5)
+    p.add_argument("--trials", type=int, default=1)
     p.add_argument("--gpu_host", default="127.0.0.1", help="IP/hostname used by PyTorch RPC to reach the GPU server")
     p.add_argument("--master_port", default="29501")
     p.add_argument("--model", default="EleutherAI/gpt-j-6B")

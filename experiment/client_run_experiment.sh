@@ -30,19 +30,21 @@ if [[ -f "$VENV_ACTIVATE" ]]; then
 fi
 
 ###############################################################################
-# Run the experiment (5 trials, three modes, two phases).  Ensure that the GPU
-# server has already been started with ports 29500/29505 (+50 per additional
-# trial) for the naïve baseline and similar offsets for the other modes.  See
-# gpu_server_start.sh for details.
+# Run the experiment (5 trials by default, three modes, two phases).  Every
+# trial now uses *distinct* port ranges (stride = 50) to avoid Gloo
+# stale-socket dead-locks.  Hence the GPU host must run one set of RPC
+# servers per trial.  Launch them with e.g.
+#   TRIALS=5 ./gpu_server_start.sh
+# before executing this client script.
 ###############################################################################
 python experiment_driver.py \
-       --trials 5 \
+       --trials "${TRIALS:-1}" \
        --gpu_host "$GPU_HOST" \
        --master_port 29500 \
        --model "$MODEL" \
-       --trial_port_stride 0 \
        --modes naive,remote_cache,sys_simulated \
        --external_server \
+       --trial_port_stride "${TRIAL_PORT_STRIDE:-0}" \
        --output stage2_results.csv
 
 echo "Experiment complete. Results written to stage2_results.csv." 

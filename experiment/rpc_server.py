@@ -71,13 +71,22 @@ class RemoteWorker:
             with torch.no_grad():
                 _GLOBAL_MODEL = AutoModelForCausalLM.from_config(config)
 
-                # Cast to requested dtype *before* moving to device.
-                if dtype == "float16" and device == "cuda":
+                # Cast to requested dtype **on CPU** first.  We defer the costly
+                # `.to(self.device)` call until after *real* weights have been
+                # materialised.  This avoids allocating ~12 GB of GPU memory
+                # per server process for an empty parameter skeleton which is
+                # never used for computation.
+
+                if dtype == "float16":
                     _GLOBAL_MODEL = _GLOBAL_MODEL.half()  # type: ignore[assignment]
-                elif dtype == "bfloat16" and device == "cuda":
+                elif dtype == "bfloat16":
                     _GLOBAL_MODEL = _GLOBAL_MODEL.to(dtype=torch.bfloat16)  # type: ignore[arg-type, assignment]
 
-                _GLOBAL_MODEL = _GLOBAL_MODEL.to(self.device)  # type: ignore[assignment]
+                # NOTE: We deliberately keep the skeleton on *CPU* here.  The
+                # first call to `load_weights_remote` or `download_weights_remote`
+                # will move the fully-initialised model to `self.device` once and
+                # reuse it for all subsequent RemoteWorker instances that share
+                # the same global model object.
 
             _GLOBAL_MODEL_DTYPE = dtype
             _GLOBAL_WEIGHTS_LOADED = False
@@ -253,6 +262,10 @@ class RemoteWorker:
         global _GLOBAL_WEIGHTS_LOADED  # noqa: PLW0603
 
         if not _GLOBAL_WEIGHTS_LOADED:
+            # Move *once* to the desired device now that real weights exist.
+            if next(self.model.parameters()).device.type == "cpu":  # type: ignore[arg-type]
+                self.model = self.model.to(self.device)  # type: ignore[assignment]
+
             self.model.load_state_dict(state_dict, strict=False)  # type: ignore[attr-defined]
             self.weights_loaded = True
             _GLOBAL_WEIGHTS_LOADED = True
@@ -274,7 +287,14 @@ class RemoteWorker:
             elif getattr(self.model, "dtype", torch.float32) == torch.bfloat16:  # type: ignore[attr-defined]
                 full_model = full_model.to(dtype=torch.bfloat16)
             
-            # Load the weights into our model
+            # Move the (still CPU-resident) skeleton to GPU **once** and then
+            # load the weights.  We re-use the same global model instance for
+            # all RemoteWorkers within this process, so subsequent calls will
+            # skip the costly transfer.
+
+            if next(self.model.parameters()).device.type == "cpu":  # type: ignore[arg-type]
+                self.model = self.model.to(self.device)  # type: ignore[assignment]
+
             self.model.load_state_dict(full_model.state_dict(), strict=False)  # type: ignore[attr-defined]
             self.weights_loaded = True
             _GLOBAL_WEIGHTS_LOADED = True
