@@ -131,10 +131,19 @@ class RemoteWorker:
     # ------------------------------------------------------------------
 
     def start_gpu_monitor_remote(self):
-        """Start nvidia-smi dmon on the GPU host (no-op if already running)."""
-        if self._gpu_mon_proc is not None:
+        """Begin GPU-util sampling.
+
+        We *try* to launch ``nvidia-smi dmon``.  If that binary is absent or
+        fails, we gracefully fall back to a lightweight timer-based estimate
+        that derives utilisation from our CUDA kernel timers.
+        """
+
+        if getattr(self, "_wall_start", None) is not None:
             LOGGER.debug("GPU monitor already running; skipping start.")
             return
+
+        self._kernel_ms_baseline = _GPU_KERNEL_MS
+        self._wall_start = time.perf_counter()
 
         self._dmon_csv = f"/tmp/dmon_{uuid.uuid4().hex}.csv"
         cmd = [
@@ -151,7 +160,7 @@ class RemoteWorker:
             self._gpu_mon_proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             LOGGER.debug("Started GPU monitor: %s", cmd)
         except FileNotFoundError:
-            LOGGER.warning("nvidia-smi not found – GPU utilisation will be 0%%")
+            LOGGER.info("No nvidia-smi binary – will use kernel-time based utilisation estimate.")
             self._gpu_mon_proc = None
 
     def _parse_dmon_csv(self, path: str) -> float:
@@ -175,29 +184,40 @@ class RemoteWorker:
             return 0.0
 
     def stop_gpu_monitor_remote(self) -> float:
-        """Terminate dmon and return average SM utilisation (%%)."""
-        if self._gpu_mon_proc is None:
-            LOGGER.debug("GPU monitor not running; returning 0%% util")
-            return 0.0
+        """Stop monitoring and return average SM utilisation (in %)."""
 
-        # Terminate and wait briefly
-        self._gpu_mon_proc.terminate()
-        try:
-            self._gpu_mon_proc.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            self._gpu_mon_proc.kill()
-            self._gpu_mon_proc.wait()
-
-        self._gpu_mon_proc = None
-
-        util = 0.0
-        if self._dmon_csv:
-            util = self._parse_dmon_csv(self._dmon_csv)
+        # 1) If dmon was running, terminate and parse CSV.
+        util = None
+        if self._gpu_mon_proc is not None:
+            self._gpu_mon_proc.terminate()
             try:
-                Path(self._dmon_csv).unlink(missing_ok=True)
-            except Exception:
-                pass
+                self._gpu_mon_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self._gpu_mon_proc.kill()
+                self._gpu_mon_proc.wait()
+
+            self._gpu_mon_proc = None
+
+            if self._dmon_csv:
+                util = self._parse_dmon_csv(self._dmon_csv)
+                try:
+                    Path(self._dmon_csv).unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+        # 2) Fallback: derive utilisation from kernel timers if CSV failed or dmon missing.
+        if util is None or util == 0.0:
+            wall_ms = (time.perf_counter() - getattr(self, "_wall_start", time.perf_counter())) * 1000.0
+            if wall_ms > 0:
+                with _METRIC_LOCK:
+                    kernel_ms_delta = _GPU_KERNEL_MS - getattr(self, "_kernel_ms_baseline", 0.0)
+                util = min(100.0, 100.0 * kernel_ms_delta / wall_ms)
+            else:
+                util = 0.0
+
         LOGGER.debug("GPU monitor stopped; avg SM util=%.2f%%", util)
+        # Clean baseline attributes for next run
+        self._wall_start = None  # type: ignore[attr-defined]
         return util
 
     def get_rpc_bytes(self) -> int:
