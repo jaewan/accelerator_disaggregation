@@ -24,6 +24,7 @@ import torch  # type: ignore
 from torch.distributed import rpc  # type: ignore
 from transformers import AutoConfig, AutoModelForCausalLM  # type: ignore
 import subprocess
+import threading
 from pathlib import Path
 
 logging.basicConfig(
@@ -47,6 +48,22 @@ LOGGER = logging.getLogger(__name__)
 _GLOBAL_MODEL: Optional[AutoModelForCausalLM] = None
 _GLOBAL_MODEL_DTYPE: Optional[str] = None
 _GLOBAL_WEIGHTS_LOADED: bool = False
+
+# Global timing accumulators for detailed performance metrics
+_GPU_KERNEL_MS: float = 0.0  # accumulated GPU kernel execution time (ms)
+_SERDES_MS: float = 0.0      # accumulated (de)serialisation / compression time (ms)
+_KERNEL_CALLS: int = 0       # number of forward passes timed
+
+# Protect shared metric variables – Torch RPC may run handlers concurrently.
+_METRIC_LOCK = threading.Lock()
+
+# Helper to update GPU timing counters in a thread-safe manner.
+def _record_gpu_time(delta_ms: float):
+    """Accumulate *delta_ms* into the global GPU kernel timer and increment call counter."""
+    global _GPU_KERNEL_MS, _KERNEL_CALLS  # noqa: PLW0603
+    with _METRIC_LOCK:
+        _GPU_KERNEL_MS += delta_ms
+        _KERNEL_CALLS += 1
 
 class RemoteWorker:
     """Remote side logic that lives on GPU_HOST.
@@ -194,6 +211,24 @@ class RemoteWorker:
         """Return total parameter size of the model resident on this worker *in bytes*."""
         return sum(p.numel() * p.element_size() for p in self.model.parameters())  # type: ignore[attr-defined]
 
+    def get_timing_metrics_remote(self) -> Dict[str, float]:
+        """Return accumulated timing metrics (in milliseconds) since last reset."""
+        # Copy under lock to avoid tearing
+        with _METRIC_LOCK:
+            return {
+                "gpu_kernel_ms": _GPU_KERNEL_MS,
+                "serdes_ms": _SERDES_MS,
+                "kernel_calls": _KERNEL_CALLS,
+            }
+
+    def reset_metrics_remote(self) -> None:
+        """Reset accumulated timing metrics (GPU + serdes)."""
+        global _GPU_KERNEL_MS, _SERDES_MS, _KERNEL_CALLS  # noqa: PLW0603
+        with _METRIC_LOCK:
+            _GPU_KERNEL_MS = 0.0
+            _SERDES_MS = 0.0
+            _KERNEL_CALLS = 0
+
     # ------------------------------------------------------------------
     # Helper utilities
     # ------------------------------------------------------------------
@@ -208,19 +243,36 @@ class RemoteWorker:
         return moved
 
     def _compress_tensor(self, tensor):
-        """Compress tensor via torch.save to avoid NumPy dependency."""
+        """Compress tensor via torch.save while tracking (de)serialisation time."""
+        global _SERDES_MS  # noqa: PLW0603
+
+        start_t = time.perf_counter()
+
         if tensor.dtype != torch.float16:
             tensor = tensor.half()
 
         buffer = io.BytesIO()
         torch.save(tensor.cpu(), buffer)
-        return zlib.compress(buffer.getvalue(), level=6)
+        compressed = zlib.compress(buffer.getvalue(), level=6)
+
+        with _METRIC_LOCK:
+            _SERDES_MS += (time.perf_counter() - start_t) * 1000.0  # ms
+
+        return compressed
 
     def _decompress_tensor(self, compressed_data):
-        """Inverse of _compress_tensor."""
+        """Inverse of _compress_tensor with timing."""
+        global _SERDES_MS  # noqa: PLW0603
+
+        start_t = time.perf_counter()
+
         decompressed = zlib.decompress(compressed_data)
         buffer = io.BytesIO(decompressed)
         tensor = torch.load(buffer)
+
+        with _METRIC_LOCK:
+            _SERDES_MS += (time.perf_counter() - start_t) * 1000.0  # ms
+
         return tensor.to(self.device)
 
     # ------------------------------------------------------------------
@@ -246,7 +298,17 @@ class RemoteWorker:
         kv_cache = self._move_kv_cache(kv_cache, self.device)
 
         with torch.no_grad():
+            if torch.cuda.is_available():
+                start_ev = torch.cuda.Event(enable_timing=True)
+                end_ev = torch.cuda.Event(enable_timing=True)
+                start_ev.record()  # type: ignore[arg-type]
+
             outputs = self.model(input_ids=input_ids, past_key_values=kv_cache, use_cache=True)  # type: ignore[operator]
+
+            if torch.cuda.is_available():
+                end_ev.record()  # type: ignore[arg-type]
+                torch.cuda.synchronize()
+                _record_gpu_time(start_ev.elapsed_time(end_ev))
 
         logits = outputs.logits.cpu()
         pkv = self._move_kv_cache(outputs.past_key_values, torch.device("cpu"))
@@ -313,7 +375,17 @@ class RemoteWorker:
     def run_prefill_remote(self, token_ids: torch.Tensor):
         token_ids = token_ids.to(self.device, non_blocking=True)
         with torch.no_grad():
+            if torch.cuda.is_available():
+                start_ev = torch.cuda.Event(enable_timing=True)
+                end_ev = torch.cuda.Event(enable_timing=True)
+                start_ev.record()  # type: ignore[arg-type]
+
             outputs = self.model(input_ids=token_ids, use_cache=True)  # type: ignore[operator]
+
+            if torch.cuda.is_available():
+                end_ev.record()  # type: ignore[arg-type]
+                torch.cuda.synchronize()
+                _record_gpu_time(start_ev.elapsed_time(end_ev))
         logits = outputs.logits.cpu()
         kv_cache_id = str(uuid.uuid4())
         self.kv_cache_store[kv_cache_id] = self._move_kv_cache(outputs.past_key_values, torch.device("cpu"))
@@ -327,7 +399,17 @@ class RemoteWorker:
         kv_cache = self._move_kv_cache(self.kv_cache_store[kv_cache_id], self.device)
 
         with torch.no_grad():
+            if torch.cuda.is_available():
+                start_ev = torch.cuda.Event(enable_timing=True)
+                end_ev = torch.cuda.Event(enable_timing=True)
+                start_ev.record()  # type: ignore[arg-type]
+
             outputs = self.model(input_ids=token_id, past_key_values=kv_cache, use_cache=True)  # type: ignore[operator]
+
+            if torch.cuda.is_available():
+                end_ev.record()  # type: ignore[arg-type]
+                torch.cuda.synchronize()
+                _record_gpu_time(start_ev.elapsed_time(end_ev))
         logits = outputs.logits.cpu()
         # Update stored cache on CPU to minimise GPU memory footprint between calls.
         self.kv_cache_store[kv_cache_id] = self._move_kv_cache(outputs.past_key_values, torch.device("cpu"))
@@ -337,7 +419,17 @@ class RemoteWorker:
         """Realistic semantic-blind caching: KV cache stays resident remotely."""
         input_ids = input_ids.to(self.device, non_blocking=True)
         with torch.no_grad():
+            if torch.cuda.is_available():
+                start_ev = torch.cuda.Event(enable_timing=True)
+                end_ev = torch.cuda.Event(enable_timing=True)
+                start_ev.record()  # type: ignore[arg-type]
+
             outputs = self.model(input_ids=input_ids, use_cache=True)  # type: ignore[operator]
+
+            if torch.cuda.is_available():
+                end_ev.record()  # type: ignore[arg-type]
+                torch.cuda.synchronize()
+                _record_gpu_time(start_ev.elapsed_time(end_ev))
         logits = outputs.logits.cpu()
         kv_handle = str(uuid.uuid4())
         # Keep KV cache on GPU for realistic semantic-blind caching baseline
@@ -363,7 +455,17 @@ class RemoteWorker:
         kv_cache = self.kv_cache_store[kv_handle]  # Already on GPU, no transfer needed
 
         with torch.no_grad():
+            if torch.cuda.is_available():
+                start_ev = torch.cuda.Event(enable_timing=True)
+                end_ev = torch.cuda.Event(enable_timing=True)
+                start_ev.record()  # type: ignore[arg-type]
+
             outputs = self.model(input_ids=token_id, past_key_values=kv_cache, use_cache=True)  # type: ignore[operator]
+
+            if torch.cuda.is_available():
+                end_ev.record()  # type: ignore[arg-type]
+                torch.cuda.synchronize()
+                _record_gpu_time(start_ev.elapsed_time(end_ev))
         logits = outputs.logits.cpu()
         # Update KV cache on GPU - stays resident remotely
         self.kv_cache_store[kv_handle] = outputs.past_key_values
@@ -376,7 +478,17 @@ class RemoteWorker:
         kv_cache = self._move_kv_cache(kv_cache, self.device)
 
         with torch.no_grad():
+            if torch.cuda.is_available():
+                start_ev = torch.cuda.Event(enable_timing=True)
+                end_ev = torch.cuda.Event(enable_timing=True)
+                start_ev.record()  # type: ignore[arg-type]
+
             outputs = self.model(input_ids=token_id, past_key_values=kv_cache, use_cache=True)  # type: ignore[operator]
+
+            if torch.cuda.is_available():
+                end_ev.record()  # type: ignore[arg-type]
+                torch.cuda.synchronize()
+                _record_gpu_time(start_ev.elapsed_time(end_ev))
         logits = outputs.logits.cpu()
         updated_kv_cache = self._move_kv_cache(outputs.past_key_values, torch.device("cpu"))
         return logits, updated_kv_cache
@@ -401,7 +513,17 @@ class RemoteWorker:
         token_ids = token_ids.to(self.device, non_blocking=True)
 
         with torch.no_grad():
+            if torch.cuda.is_available():
+                start_ev = torch.cuda.Event(enable_timing=True)
+                end_ev = torch.cuda.Event(enable_timing=True)
+                start_ev.record()  # type: ignore[arg-type]
+
             outputs = self.model(input_ids=token_ids, use_cache=True)  # type: ignore[operator]
+
+            if torch.cuda.is_available():
+                end_ev.record()  # type: ignore[arg-type]
+                torch.cuda.synchronize()
+                _record_gpu_time(start_ev.elapsed_time(end_ev))
 
         logits = outputs.logits.cpu()
         logits_blob = self._compress_tensor(logits)
@@ -423,7 +545,17 @@ class RemoteWorker:
         kv_cache = self._move_kv_cache(self.kv_cache_store[kv_cache_id], self.device)
 
         with torch.no_grad():
+            if torch.cuda.is_available():
+                start_ev = torch.cuda.Event(enable_timing=True)
+                end_ev = torch.cuda.Event(enable_timing=True)
+                start_ev.record()  # type: ignore[arg-type]
+
             outputs = self.model(input_ids=token_id, past_key_values=kv_cache, use_cache=True)  # type: ignore[operator]
+
+            if torch.cuda.is_available():
+                end_ev.record()  # type: ignore[arg-type]
+                torch.cuda.synchronize()
+                _record_gpu_time(start_ev.elapsed_time(end_ev))
 
         logits = outputs.logits.cpu()
         logits_blob = self._compress_tensor(logits)

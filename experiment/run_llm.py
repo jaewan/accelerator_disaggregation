@@ -137,6 +137,50 @@ def _collect_net_bytes() -> int:
     # Metrics not available – return 0 so downstream code still works.
     return 0
 
+
+def _collect_rpc_time_ms() -> float:
+    """Return total RPC time (ms) recorded by the current agent.
+
+    Sums all metric counters whose key contains the substring "time" to stay
+    version-agnostic.  Attempts both the public and internal agent access
+    paths similar to _collect_net_bytes().
+    """
+    # Strategy 1 – official get_rpc_agent()
+    agent_getter = getattr(rpc, "get_rpc_agent", None)
+    if callable(agent_getter):
+        try:
+            metrics = agent_getter().get_metrics()  # type: ignore[attr-defined]
+            total_us = 0
+            for k, v in metrics.items():
+                if "time" in k.lower():
+                    try:
+                        total_us += int(v)
+                    except (ValueError, TypeError):
+                        continue
+            return total_us / 1000.0  # convert µs → ms
+        except Exception:
+            pass
+
+    # Strategy 2 – internal binding
+    try:
+        from torch._C._distributed_rpc import _get_current_rpc_agent  # type: ignore
+
+        agent = _get_current_rpc_agent()
+        if agent is not None and hasattr(agent, "get_metrics"):
+            metrics = agent.get_metrics()  # type: ignore[attr-defined]
+            total_us = 0
+            for k, v in metrics.items():  # type: ignore[assignment]
+                if "time" in k.lower():
+                    try:
+                        total_us += int(v)
+                    except (ValueError, TypeError):
+                        continue
+            return total_us / 1000.0
+    except Exception:
+        pass
+
+    return 0.0
+
 LOGGER = logging.getLogger(__name__)
 
 def _parse_args(argv: List[str] | None = None):
@@ -237,6 +281,7 @@ def _run_local(args):
 def _run_naive_remote(args):
     _init_rpc(args)
     import rpc_server
+    global _COMPRESS_MS  # noqa: PLW0603
 
     # Create a remote reference to a new RemoteWorker instance on the server.
     worker_rref = rpc.remote("GPU_WORKER", rpc_server.RemoteWorker, args=(args.model,))
@@ -279,8 +324,26 @@ def _run_naive_remote(args):
 
     # Get network bytes directly from the agent's metrics.
     net_bytes = _collect_net_bytes()
-    
+
+    # Retrieve detailed timing metrics from the server and local RPC agent
+    timing_metrics = _rpc_sync(worker_rref, rpc_server.RemoteWorker.get_timing_metrics_remote)
+    server_gpu_ms = timing_metrics.get("gpu_kernel_ms", 0.0)
+    server_serdes_ms = timing_metrics.get("serdes_ms", 0.0)
+    rpc_time_ms = _collect_rpc_time_ms()
+
+    # Reset server-side timers for the next run
+    _rpc_sync(worker_rref, rpc_server.RemoteWorker.reset_metrics_remote)
+
     avg_sm = _rpc_sync(worker_rref, rpc_server.RemoteWorker.stop_gpu_monitor_remote)
+
+    # Print detailed metrics before the standard summary lines
+    print(f"SERVER_GPU_KERNEL_MS: {server_gpu_ms}")
+    print(f"SERVER_SERDES_MS: {server_serdes_ms}")
+    print(f"CLIENT_SERDES_MS: {_COMPRESS_MS}")
+    print(f"RPC_TIME_MS: {rpc_time_ms}")
+
+    # Reset client compression/decompression timer for next run
+    _COMPRESS_MS = 0.0
 
     # IMPORTANT: clear any per-run KV caches so that subsequent trials do not
     # accumulate GPU memory and so that the RemoteWorker can be reused safely
@@ -296,6 +359,7 @@ def _run_remote_cache(args):
     """Run in remote-cache mode (client sends tokens, gets logits + handle)."""
     _init_rpc(args)
     import rpc_server
+    global _COMPRESS_MS  # noqa: PLW0603
 
     # Create a remote reference to a new RemoteWorker instance on the server.
     worker_rref = rpc.remote("GPU_WORKER", rpc_server.RemoteWorker, args=(args.model,))
@@ -355,8 +419,22 @@ def _run_remote_cache(args):
         raise ValueError(f"Unknown phase for remote_cache mode: {args.phase}")
 
     net_bytes = _collect_net_bytes()
+
+    timing_metrics = _rpc_sync(worker_rref, rpc_server.RemoteWorker.get_timing_metrics_remote)
+    server_gpu_ms = timing_metrics.get("gpu_kernel_ms", 0.0)
+    server_serdes_ms = timing_metrics.get("serdes_ms", 0.0)
+    rpc_time_ms = _collect_rpc_time_ms()
+
+    _rpc_sync(worker_rref, rpc_server.RemoteWorker.reset_metrics_remote)
     
     avg_sm = _rpc_sync(worker_rref, rpc_server.RemoteWorker.stop_gpu_monitor_remote)
+
+    print(f"SERVER_GPU_KERNEL_MS: {server_gpu_ms}")
+    print(f"SERVER_SERDES_MS: {server_serdes_ms}")
+    print(f"CLIENT_SERDES_MS: {_COMPRESS_MS}")
+    print(f"RPC_TIME_MS: {rpc_time_ms}")
+
+    _COMPRESS_MS = 0.0
 
     # IMPORTANT: clear any per-run KV caches so that subsequent trials do not
     # accumulate GPU memory and so that the RemoteWorker can be reused safely
@@ -409,8 +487,20 @@ def _run_sys_simulated(args):
             logits = _decompress_tensor(logits_blob)
 
     net_bytes = _collect_net_bytes()
+
+    timing_metrics = _rpc_sync(worker_rref, rpc_server.RemoteWorker.get_timing_metrics_remote)
+    server_gpu_ms = timing_metrics.get("gpu_kernel_ms", 0.0)
+    server_serdes_ms = timing_metrics.get("serdes_ms", 0.0)
+    rpc_time_ms = _collect_rpc_time_ms()
+
+    _rpc_sync(worker_rref, rpc_server.RemoteWorker.reset_metrics_remote)
     
     avg_sm = _rpc_sync(worker_rref, rpc_server.RemoteWorker.stop_gpu_monitor_remote)
+
+    print(f"SERVER_GPU_KERNEL_MS: {server_gpu_ms}")
+    print(f"SERVER_SERDES_MS: {server_serdes_ms}")
+    print(f"CLIENT_SERDES_MS: {_COMPRESS_MS}")
+    print(f"RPC_TIME_MS: {rpc_time_ms}")
 
     # IMPORTANT: clear any per-run KV caches so that subsequent trials do not
     # accumulate GPU memory and so that the RemoteWorker can be reused safely
