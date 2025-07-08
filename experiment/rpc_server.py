@@ -461,7 +461,17 @@ class RemoteWorker:
         """Run prefill and return actual KV cache tensors (for remote cache baseline)."""
         token_ids = token_ids.to(self.device, non_blocking=True)
         with torch.no_grad():
+            if torch.cuda.is_available():
+                start_ev = torch.cuda.Event(enable_timing=True)
+                end_ev = torch.cuda.Event(enable_timing=True)
+                start_ev.record()  # type: ignore[arg-type]
+
             outputs = self.model(input_ids=token_ids, use_cache=True)  # type: ignore[operator]
+
+            if torch.cuda.is_available():
+                end_ev.record()  # type: ignore[arg-type]
+                torch.cuda.synchronize()
+                _record_gpu_time(start_ev.elapsed_time(end_ev))
         logits = outputs.logits.cpu()
         kv_cache = self._move_kv_cache(outputs.past_key_values, torch.device("cpu"))
         LOGGER.debug("Prefill with cache complete; returning actual KV cache tensors")
