@@ -41,6 +41,9 @@ fsspec==2025.5.1
 networkx==3.4.2
 typing_extensions==4.14.0
 
+# Compression
+zstandard==0.22.0
+
 # Template engine
 Jinja2==3.1.6
 MarkupSafe==3.0.2

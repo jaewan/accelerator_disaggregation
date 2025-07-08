@@ -16,7 +16,7 @@ import sys
 import time
 import uuid
 from typing import Any, Dict, List, Tuple, Optional
-import zlib
+import zstandard as zstd  # type: ignore
 import pickle
 import io
 
@@ -273,7 +273,7 @@ class RemoteWorker:
 
         buffer = io.BytesIO()
         torch.save(tensor.cpu(), buffer)
-        compressed = zlib.compress(buffer.getvalue(), level=6)
+        compressed = zstd.compress(buffer.getvalue(), level=3)
 
         with _METRIC_LOCK:
             _SERDES_MS += (time.perf_counter() - start_t) * 1000.0  # ms
@@ -286,7 +286,7 @@ class RemoteWorker:
 
         start_t = time.perf_counter()
 
-        decompressed = zlib.decompress(compressed_data)
+        decompressed = zstd.decompress(compressed_data)
         buffer = io.BytesIO(decompressed)
         tensor = torch.load(buffer)
 

@@ -21,7 +21,7 @@ import torch
 from torch.distributed import rpc
 from rpc_utils import rpc_sync_with_rref as _rpc_sync
 from transformers import AutoModelForCausalLM, AutoTokenizer
-import zlib
+import zstandard as zstd  # type: ignore
 import pickle
 import io
 
@@ -67,7 +67,7 @@ def _compress_tensor(tensor):
     if tensor.dtype == torch.float32:
         tensor = tensor.half()
 
-    blob = zlib.compress(_tensor_to_bytes(tensor), level=6)
+    blob = zstd.compress(_tensor_to_bytes(tensor), level=3)
     _COMPRESS_MS += (time.perf_counter() - start_t) * 1000.0
     return blob
 
@@ -76,7 +76,7 @@ def _decompress_tensor(compressed_data):
     global _COMPRESS_MS  # noqa: PLW0603
     start_t = time.perf_counter()
 
-    tensor = _bytes_to_tensor(zlib.decompress(compressed_data))
+    tensor = _bytes_to_tensor(zstd.decompress(compressed_data))
     # Restore to float32 for logits if originally half? Keep as float16 is fine.
     _COMPRESS_MS += (time.perf_counter() - start_t) * 1000.0
     return tensor
