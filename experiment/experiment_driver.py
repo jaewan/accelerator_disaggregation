@@ -613,8 +613,9 @@ def run_experiment(args):
                         trial_offset = (trial - 1) * TRIAL_PORT_STRIDE
 
                         # Separate port for every decode phase (avoid stale sockets *within* a trial)
-                        # We now use a single server per mode; prefill and decode share the same port.
-                        phase_offset = 0
+                        # Prefill connects to the base_port; decode uses base_port + 5 so it can
+                        # establish a fresh RPC world on the *same* GPU but in a different process.
+                        phase_offset = 0 if phase == "prefill" else 5
 
                         run_port = str(base_port + mode_offset + phase_offset + trial_offset)
 

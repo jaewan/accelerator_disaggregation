@@ -96,6 +96,15 @@ declare -A BASE_PORTS=(
   [remote_cache_delta_compressed]=29530
 )
 
+# We launch *two* servers per mode: one for prefill (base port) and one for
+# decode (base port + 5).  Both servers run on the SAME GPU so they share the
+# global model parameters but live in independent processes.  This avoids the
+# TensorPipe/Gloo stale-socket issue that arises when the client reconnects to
+# the same RPC world for the decode phase.
+
+# Helper array so we can iterate deterministically in the for-loop below.
+PHASE_OFFSETS=(0 5)
+
 # Initialize PID file
 echo > "logs/gpu_server_pids.txt"
 
@@ -106,11 +115,17 @@ for ((t=0; t<TRIALS; t++)); do
   for key in "${!BASE_PORTS[@]}"; do
     base_port=${BASE_PORTS[$key]}
     port=$((base_port + offset))
-    logfile="${key}_trial$((t+1)).log"
     gpu_id=${GPU_IDX[$key]:-0}
-    if ! start_server "$port" "$logfile" "$gpu_id"; then
-      failed_servers=$((failed_servers + 1))
-    fi
+
+    # Start *two* servers per mode: prefill (phase_offset=0) and decode (+5)
+    for phase_offset in "${PHASE_OFFSETS[@]}"; do
+      phase_port=$((port + phase_offset))
+      phase_label=$([[ $phase_offset -eq 0 ]] && echo "prefill" || echo "decode")
+      logfile="${key}_${phase_label}_trial$((t+1)).log"
+      if ! start_server "$phase_port" "$logfile" "$gpu_id"; then
+        failed_servers=$((failed_servers + 1))
+      fi
+    done
   done
 done
 
