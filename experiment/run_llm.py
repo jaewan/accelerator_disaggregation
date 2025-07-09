@@ -633,11 +633,11 @@ def _apply_delta_to_kv_cache(kv_cache, delta_cache):
     return kv_cache
 
 
-def _run_remote_cache_delta(args):
-    """Remote cache with delta-KV transfer (semantic-aware)."""
+def _run_remote_cache_delta_raw(args):
+    """Remote cache delta without compression (semantic-blind)."""
     _init_rpc(args)
     import rpc_server
-    global _COMPRESS_MS  # noqa: PLW0603
+    global _COMPRESS_MS
 
     worker_rref = rpc.remote("GPU_WORKER", rpc_server.RemoteWorker, args=(args.model,))
     _rpc_sync(worker_rref, rpc_server.RemoteWorker.download_weights_remote, args.model)
@@ -663,24 +663,20 @@ def _run_remote_cache_delta(args):
             rpc_server.RemoteWorker.run_prefill_with_cache_delta_remote,
             prefill_ids,
         )
-        print("Running decode – transferring *delta* KV cache each step…")
+        print("Running decode – transferring *delta* KV cache each step (raw)…")
         next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
         for i in range(DECODE_STEPS):
             print(f"Decode step {i+1}…")
-            logits, compressed_delta = _rpc_sync(
+            logits, delta_cache = _rpc_sync(
                 worker_rref,
-                rpc_server.RemoteWorker.run_decode_step_with_cache_delta_remote,
+                rpc_server.RemoteWorker.run_decode_step_with_cache_delta_raw_remote,
                 next_token,
             )
-            # Decompress delta and update local KV cache
-            start_t = time.perf_counter()
-            delta_cache = torch.load(io.BytesIO(zstd.decompress(compressed_delta)))
-            _COMPRESS_MS += (time.perf_counter() - start_t) * 1000.0
             kv_cache = _apply_delta_to_kv_cache(kv_cache, delta_cache)
             next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
         print("Decode complete.")
     else:
-        raise ValueError("Unknown phase for remote_cache_delta")
+        raise ValueError("Unknown phase for remote_cache_delta_raw")
 
     net_bytes = _collect_net_bytes()
     timing_metrics = _rpc_sync(worker_rref, rpc_server.RemoteWorker.get_timing_metrics_remote)
@@ -700,6 +696,13 @@ def _run_remote_cache_delta(args):
     _rpc_sync(worker_rref, rpc_server.RemoteWorker.reset_state_remote)
     _shutdown_rpc()
 
+# Rename old compressed function
+_run_remote_cache_delta_compressed = _run_remote_cache_delta  # type: ignore
+
+def _run_remote_cache_delta(args):
+    """Alias to raw (non-compressed) delta path for backward compatibility."""
+    _run_remote_cache_delta_raw(args)
+
 def main(argv: List[str] | None = None):
     args = _parse_args(argv)
     if args.mode == "local":
@@ -713,7 +716,7 @@ def main(argv: List[str] | None = None):
     elif args.mode == "remote_cache_delta":
         _run_remote_cache_delta(args)
     elif args.mode == "remote_cache_delta_compressed":
-        _run_remote_cache_delta(args)
+        _run_remote_cache_delta_compressed(args)
     elif args.mode == "sys_simulated":
         _run_sys_simulated(args)
     else:

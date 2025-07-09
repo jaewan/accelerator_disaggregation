@@ -484,7 +484,7 @@ def run_experiment(args):
     MODE_DEFS: Dict[str, str] = {
         "local": "Local (Baseline)",
         "naive": "Semantic-Blind (Naive)",
-        "remote_cache_delta": "Semantic-Blind + Delta KV Cache (Uncompressed)",
+        "remote_cache_delta": "Semantic-Blind + Delta KV Cache (Raw)",
         "remote_cache_delta_compressed": "Semantic-Blind + Delta KV Cache (Compressed)",
         "sys_simulated": "Framework-Level Semantic-Aware (\\sys)",
     }

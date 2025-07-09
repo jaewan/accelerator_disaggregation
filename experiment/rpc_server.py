@@ -782,6 +782,39 @@ class RemoteWorker:
 
         return logits, compressed_delta
 
+    def run_decode_step_with_cache_delta_raw_remote(self, token_id: torch.Tensor):
+        """Decode step that returns *delta* KV cache uncompressed (raw tensors)."""
+        token_id = token_id.to(self.device, non_blocking=True)
+ 
+        if "_delta" not in self.kv_cache_store:
+            raise RuntimeError("Delta KV cache not initialised; run prefill first")
+ 
+        kv_cache = self._move_kv_cache(self.kv_cache_store["_delta"], self.device)
+ 
+        with torch.no_grad():
+            if torch.cuda.is_available():
+                start_ev = torch.cuda.Event(enable_timing=True)
+                end_ev = torch.cuda.Event(enable_timing=True)
+                start_ev.record()  # type: ignore[arg-type]
+ 
+            outputs = self.model(input_ids=token_id, past_key_values=kv_cache, use_cache=True)  # type: ignore[operator]
+ 
+            if torch.cuda.is_available():
+                end_ev.record()  # type: ignore[arg-type]
+                torch.cuda.synchronize()
+                _record_gpu_time(start_ev.elapsed_time(end_ev), self)
+ 
+        logits = outputs.logits.cpu()
+        updated_kv_cache = self._move_kv_cache(outputs.past_key_values, torch.device("cpu"))
+ 
+        # Update resident cache
+        self.kv_cache_store["_delta"] = updated_kv_cache
+ 
+        # Extract delta slice (last position only)
+        delta_kv_cache = self._extract_delta_cache(updated_kv_cache)
+ 
+        return logits, delta_kv_cache
+
 
 # --------------------------------------------------------------------------------------
 # RPC server bootstrap

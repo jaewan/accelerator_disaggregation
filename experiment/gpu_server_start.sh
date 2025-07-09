@@ -50,6 +50,7 @@ fi
 declare -A GPU_IDX=(
   [naive]=0
   [remote_cache_delta]=1
+  [remote_cache_delta_compressed]=1
   [sys_simulated]=2
 )
 
