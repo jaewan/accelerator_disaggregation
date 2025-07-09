@@ -185,7 +185,7 @@ LOGGER = logging.getLogger(__name__)
 
 def _parse_args(argv: List[str] | None = None):
     parser = argparse.ArgumentParser(description="Client orchestrator for LLM experiments")
-    parser.add_argument("--mode", required=True, choices=["local", "naive", "remote_cache", "sys_simulated"])
+    parser.add_argument("--mode", required=True, choices=["local", "naive", "remote_cache", "remote_cache_compressed", "sys_simulated"])
     parser.add_argument("--phase", required=True, choices=["prefill", "decode"])
     parser.add_argument("--model", default="EleutherAI/gpt-j-6B")
     parser.add_argument("--prompt", default="The quick brown fox jumps over the lazy dog. " * 8)
@@ -447,6 +447,87 @@ def _run_remote_cache(args):
     _shutdown_rpc()
 
 
+def _run_remote_cache_compressed(args):
+    """Run in compressed remote-cache mode (semantic-blind compression)."""
+    _init_rpc(args)
+    import rpc_server
+    global _COMPRESS_MS  # noqa: PLW0603
+
+    # Create a remote reference to a new RemoteWorker instance on the server.
+    worker_rref = rpc.remote("GPU_WORKER", rpc_server.RemoteWorker, args=(args.model,))
+    # Explicitly download weights on the remote worker.
+    _rpc_sync(worker_rref, rpc_server.RemoteWorker.download_weights_remote, args.model)
+
+    # Start GPU monitoring remotely
+    _rpc_sync(worker_rref, rpc_server.RemoteWorker.start_gpu_monitor_remote)
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+
+    if args.phase == "prefill":
+        prompt = "Hello, my name is"
+        input_ids = tokenizer(prompt, return_tensors="pt").input_ids
+        print(f"Running prefill with {input_ids.shape[1]} tokens (returning compressed KV cache)…")
+
+        logits, compressed_kv_cache = _rpc_sync(
+            worker_rref,
+            rpc_server.RemoteWorker.run_prefill_with_cache_compressed_remote,
+            input_ids,
+        )
+        print("Prefill complete – compressed KV cache transferred to client.")
+
+    elif args.phase == "decode":
+        prefill_prompt = "Let's get a cache first."
+        prefill_ids = tokenizer(prefill_prompt, return_tensors="pt").input_ids
+        logits, compressed_kv_cache = _rpc_sync(
+            worker_rref,
+            rpc_server.RemoteWorker.run_prefill_with_cache_compressed_remote,
+            prefill_ids,
+        )
+
+        print("Running decode – transferring compressed KV cache every step…")
+        next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
+        for i in range(DECODE_STEPS):
+            print(f"Decode step {i+1}…")
+            logits, compressed_kv_cache = _rpc_sync(
+                worker_rref,
+                rpc_server.RemoteWorker.run_decode_step_with_cache_compressed_remote,
+                next_token,
+                compressed_kv_cache,
+            )
+            next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
+        print("Decode complete.")
+    else:
+        raise ValueError(f"Unknown phase for remote_cache_compressed mode: {args.phase}")
+
+    net_bytes = _collect_net_bytes()
+
+    timing_metrics = _rpc_sync(worker_rref, rpc_server.RemoteWorker.get_timing_metrics_remote)
+    server_gpu_ms = timing_metrics.get("gpu_kernel_ms", 0.0)
+    server_serdes_ms = timing_metrics.get("serdes_ms", 0.0)
+    rpc_time_ms = _collect_rpc_time_ms()
+
+    _rpc_sync(worker_rref, rpc_server.RemoteWorker.reset_metrics_remote)
+    
+    avg_sm = _rpc_sync(worker_rref, rpc_server.RemoteWorker.stop_gpu_monitor_remote)
+
+    print(f"SERVER_GPU_KERNEL_MS: {server_gpu_ms}")
+    print(f"SERVER_SERDES_MS: {server_serdes_ms}")
+    print(f"CLIENT_SERDES_MS: {_COMPRESS_MS}")
+    print(f"RPC_TIME_MS: {rpc_time_ms}")
+
+    _COMPRESS_MS = 0.0
+
+    # IMPORTANT: clear any per-run KV caches so that subsequent trials do not
+    # accumulate GPU memory and so that the RemoteWorker can be reused safely
+    # across multiple independent RPC client connections within the same
+    # long-running server process.
+    _rpc_sync(worker_rref, rpc_server.RemoteWorker.reset_state_remote)
+
+    print(f"NETWORK_BYTES: {net_bytes}")
+    print(f"AVG_SM_UTIL: {avg_sm}")
+    _shutdown_rpc()
+
+
 def _run_sys_simulated(args):
     global _COMPRESS_MS
     _COMPRESS_MS = 0.0
@@ -521,6 +602,8 @@ def main(argv: List[str] | None = None):
         _run_naive_remote(args)
     elif args.mode == "remote_cache":
         _run_remote_cache(args)
+    elif args.mode == "remote_cache_compressed":
+        _run_remote_cache_compressed(args)
     elif args.mode == "sys_simulated":
         _run_sys_simulated(args)
     else:

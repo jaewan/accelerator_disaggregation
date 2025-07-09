@@ -425,6 +425,7 @@ def run_experiment(args):
         "local": "Local (Baseline)",
         "naive": "Semantic-Blind (Naive)",
         "remote_cache": "Semantic-Blind + Realistic Remote Cache",
+        "remote_cache_compressed": "Semantic-Blind + Compressed Remote Cache",
         "sys_simulated": "Framework-Level Semantic-Aware (\\sys)",
     }
 

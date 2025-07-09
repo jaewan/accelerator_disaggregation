@@ -491,6 +491,39 @@ class RemoteWorker:
         LOGGER.debug("Prefill with cache complete; returning actual KV cache tensors")
         return logits, kv_cache
 
+    def run_prefill_with_cache_compressed_remote(self, token_ids: torch.Tensor):
+        """Run prefill and return compressed KV cache (semantic-blind compression)."""
+        token_ids = token_ids.to(self.device, non_blocking=True)
+        with torch.no_grad():
+            if torch.cuda.is_available():
+                start_ev = torch.cuda.Event(enable_timing=True)
+                end_ev = torch.cuda.Event(enable_timing=True)
+                start_ev.record()  # type: ignore[arg-type]
+
+            outputs = self.model(input_ids=token_ids, use_cache=True)  # type: ignore[operator]
+
+            if torch.cuda.is_available():
+                end_ev.record()  # type: ignore[arg-type]
+                torch.cuda.synchronize()
+                _record_gpu_time(start_ev.elapsed_time(end_ev), self)
+        
+        logits = outputs.logits.cpu()
+        kv_cache = self._move_kv_cache(outputs.past_key_values, torch.device("cpu"))
+        
+        # Compress KV cache using semantic-blind compression (no FP32→FP16 conversion)
+        global _SERDES_MS  # noqa: PLW0603
+        start_t = time.perf_counter()
+        
+        buffer = io.BytesIO()
+        torch.save(kv_cache, buffer)
+        compressed_kv = zstd.compress(buffer.getvalue(), level=3)
+        
+        with _METRIC_LOCK:
+            _SERDES_MS += (time.perf_counter() - start_t) * 1000.0
+        
+        LOGGER.debug("Prefill with compressed cache complete; returning compressed KV cache")
+        return logits, compressed_kv
+
     def run_decode_with_handle(self, token_id: torch.Tensor, kv_handle: str):
         """Realistic semantic-blind caching: KV cache stays resident remotely."""
         if kv_handle not in self.kv_cache_store:
@@ -536,6 +569,51 @@ class RemoteWorker:
         logits = outputs.logits.cpu()
         updated_kv_cache = self._move_kv_cache(outputs.past_key_values, torch.device("cpu"))
         return logits, updated_kv_cache
+
+    def run_decode_step_with_cache_compressed_remote(self, token_id: torch.Tensor, compressed_kv_cache: bytes):
+        """Run decode step with compressed KV cache (semantic-blind compression)."""
+        token_id = token_id.to(self.device, non_blocking=True)
+        
+        # Decompress KV cache
+        global _SERDES_MS  # noqa: PLW0603
+        start_t = time.perf_counter()
+        
+        decompressed = zstd.decompress(compressed_kv_cache)
+        buffer = io.BytesIO(decompressed)
+        kv_cache = torch.load(buffer)
+        
+        with _METRIC_LOCK:
+            _SERDES_MS += (time.perf_counter() - start_t) * 1000.0
+        
+        kv_cache = self._move_kv_cache(kv_cache, self.device)
+
+        with torch.no_grad():
+            if torch.cuda.is_available():
+                start_ev = torch.cuda.Event(enable_timing=True)
+                end_ev = torch.cuda.Event(enable_timing=True)
+                start_ev.record()  # type: ignore[arg-type]
+
+            outputs = self.model(input_ids=token_id, past_key_values=kv_cache, use_cache=True)  # type: ignore[operator]
+
+            if torch.cuda.is_available():
+                end_ev.record()  # type: ignore[arg-type]
+                torch.cuda.synchronize()
+                _record_gpu_time(start_ev.elapsed_time(end_ev), self)
+        
+        logits = outputs.logits.cpu()
+        updated_kv_cache = self._move_kv_cache(outputs.past_key_values, torch.device("cpu"))
+        
+        # Compress updated KV cache
+        start_t = time.perf_counter()
+        
+        buffer = io.BytesIO()
+        torch.save(updated_kv_cache, buffer)
+        compressed_updated_kv = zstd.compress(buffer.getvalue(), level=3)
+        
+        with _METRIC_LOCK:
+            _SERDES_MS += (time.perf_counter() - start_t) * 1000.0
+        
+        return logits, compressed_updated_kv
 
     # ------------------------------------------------------------------
     # Semantic-aware execution path with compression
