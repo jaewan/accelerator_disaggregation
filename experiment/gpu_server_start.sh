@@ -90,6 +90,8 @@ declare -A BASE_PORTS=(
   [remote_cache_decode]=29515
   [sys_simulated_prefill]=29520
   [sys_simulated_decode]=29525
+  [remote_cache_delta_prefill]=29530
+  [remote_cache_delta_decode]=29535
 )
 
 # Initialize PID file

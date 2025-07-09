@@ -683,6 +683,78 @@ class RemoteWorker:
         LOGGER.debug("Semantic decode complete; kv_cache_id=%s", kv_cache_id)
         return logits_blob, kv_cache_id
 
+    # ------------------------------------------------------------------
+    # Delta KV-cache helpers
+    # ------------------------------------------------------------------
+
+    def _extract_delta_cache(self, full_cache):
+        """Return a *shallow copy* of *full_cache* that keeps only the last position.
+
+        Assumes tensors have shape (B, H, S, D) and extracts index -1 on the
+        sequence dimension (dim=2).  The returned structure matches the nested
+        list layout [[k, v], ...] expected by the client.
+        """
+        delta = []
+        for k_layer, v_layer in full_cache:
+            delta_k = k_layer[:, :, -1:, :].contiguous()
+            delta_v = v_layer[:, :, -1:, :].contiguous()
+            delta.append([delta_k, delta_v])
+        return delta
+
+    def run_prefill_with_cache_delta_remote(self, token_ids: torch.Tensor):
+        """
+        Run prefill, return full KV cache to client, AND store a copy resident
+        on the server for subsequent delta-based decode steps.
+        """
+        # Get the full cache from the existing non-delta implementation
+        logits, kv_cache = self.run_prefill_with_cache_remote(token_ids)
+
+        # Store a copy on the server for future delta steps
+        self.kv_cache_store["_delta"] = kv_cache
+
+        LOGGER.debug("Prefill with delta complete; returning full cache to client, storing copy on server.")
+        return logits, kv_cache
+
+    def run_decode_step_with_cache_delta_remote(self, token_id: torch.Tensor):
+        """Decode step that returns *delta* KV cache (only new position)."""
+        token_id = token_id.to(self.device, non_blocking=True)
+
+        if "_delta" not in self.kv_cache_store:
+            raise RuntimeError("Delta KV cache not initialised; run prefill first")
+
+        kv_cache = self._move_kv_cache(self.kv_cache_store["_delta"], self.device)
+
+        with torch.no_grad():
+            if torch.cuda.is_available():
+                start_ev = torch.cuda.Event(enable_timing=True)
+                end_ev = torch.cuda.Event(enable_timing=True)
+                start_ev.record()  # type: ignore[arg-type]
+
+            outputs = self.model(input_ids=token_id, past_key_values=kv_cache, use_cache=True)  # type: ignore[operator]
+
+            if torch.cuda.is_available():
+                end_ev.record()  # type: ignore[arg-type]
+                torch.cuda.synchronize()
+                _record_gpu_time(start_ev.elapsed_time(end_ev), self)
+
+        logits = outputs.logits.cpu()
+        updated_kv_cache = self._move_kv_cache(outputs.past_key_values, torch.device("cpu"))
+
+        # Update resident cache
+        self.kv_cache_store["_delta"] = updated_kv_cache
+
+        # Extract delta slice (last position only)
+        delta_kv_cache = self._extract_delta_cache(updated_kv_cache)
+
+        # Compress delta cache
+        start_t = time.perf_counter()
+        buffer = io.BytesIO()
+        torch.save(delta_kv_cache, buffer)
+        compressed_delta = zstd.compress(buffer.getvalue(), level=3)
+        _record_serdes_time((time.perf_counter() - start_t) * 1000.0)
+
+        return logits, compressed_delta
+
 
 # --------------------------------------------------------------------------------------
 # RPC server bootstrap

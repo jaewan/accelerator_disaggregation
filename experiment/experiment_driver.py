@@ -82,7 +82,7 @@ class ServerPool:
         # process reconnects to the same server.
         self.ports: Dict[tuple[str, str], int] = {}
 
-        mode_offsets = {"naive": 0, "remote_cache": 10, "sys_simulated": 20}
+        mode_offsets = {"naive": 0, "remote_cache": 10, "remote_cache_delta": 30, "sys_simulated": 20}
         phase_offsets = {"prefill": 0, "decode": 5}
 
         for mode in modes:
@@ -465,6 +465,7 @@ def run_experiment(args):
         "naive": "Semantic-Blind (Naive)",
         "remote_cache": "Semantic-Blind + Realistic Remote Cache",
         "remote_cache_compressed": "Semantic-Blind + Compressed Remote Cache",
+        "remote_cache_delta": "Semantic-Blind + Delta KV Cache",
         "sys_simulated": "Framework-Level Semantic-Aware (\\sys)",
     }
 
@@ -576,7 +577,7 @@ def run_experiment(args):
                         # --external_server is supplied.  Each decode server listens on
                         # `base_port + mode_offset + 5`.
                         base_port = int(args.master_port)
-                        mode_offset = {"naive": 0, "remote_cache": 10, "sys_simulated": 20}.get(mode, 30)
+                        mode_offset = {"naive": 0, "remote_cache": 10, "remote_cache_delta": 30, "sys_simulated": 20}.get(mode, 30)
 
                         # Additional per-trial offset to ensure we never reuse the exact same
                         # (ip, port, rank) rendez-vous across independent client processes.

@@ -185,7 +185,7 @@ LOGGER = logging.getLogger(__name__)
 
 def _parse_args(argv: List[str] | None = None):
     parser = argparse.ArgumentParser(description="Client orchestrator for LLM experiments")
-    parser.add_argument("--mode", required=True, choices=["local", "naive", "remote_cache", "remote_cache_compressed", "sys_simulated"])
+    parser.add_argument("--mode", required=True, choices=["local", "naive", "remote_cache", "remote_cache_compressed", "remote_cache_delta", "sys_simulated"])
     parser.add_argument("--phase", required=True, choices=["prefill", "decode"])
     parser.add_argument("--model", default="EleutherAI/gpt-j-6B")
     parser.add_argument("--prompt", default="The quick brown fox jumps over the lazy dog. " * 8)
@@ -596,6 +596,84 @@ def _run_sys_simulated(args):
     _shutdown_rpc()
     print(f"COMPRESS_MS: {_COMPRESS_MS:.2f}")
 
+# -----------------------------------------------------------------------------
+# Delta-KV helpers (semantic-aware remote cache)
+# -----------------------------------------------------------------------------
+
+
+def _apply_delta_to_kv_cache(kv_cache, delta_cache):
+    """Append *delta_cache* (last-position slice) to *kv_cache* in-place."""
+    for layer_idx, (layer_full, layer_delta) in enumerate(zip(kv_cache, delta_cache)):
+        k_full, v_full = layer_full
+        k_delta, v_delta = layer_delta
+        kv_cache[layer_idx][0] = torch.cat([k_full, k_delta], dim=2)
+        kv_cache[layer_idx][1] = torch.cat([v_full, v_delta], dim=2)
+    return kv_cache
+
+
+def _run_remote_cache_delta(args):
+    """Remote cache with delta-KV transfer (semantic-aware)."""
+    _init_rpc(args)
+    import rpc_server
+    global _COMPRESS_MS  # noqa: PLW0603
+
+    worker_rref = rpc.remote("GPU_WORKER", rpc_server.RemoteWorker, args=(args.model,))
+    _rpc_sync(worker_rref, rpc_server.RemoteWorker.download_weights_remote, args.model)
+    _rpc_sync(worker_rref, rpc_server.RemoteWorker.start_gpu_monitor_remote)
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+
+    if args.phase == "prefill":
+        prompt = "Hello, my name is"
+        input_ids = tokenizer(prompt, return_tensors="pt").input_ids
+        print("Running prefill (full KV cache)…")
+        logits, kv_cache = _rpc_sync(
+            worker_rref,
+            rpc_server.RemoteWorker.run_prefill_with_cache_delta_remote,
+            input_ids,
+        )
+        print("Prefill complete – KV cache resident on client.")
+
+    elif args.phase == "decode":
+        prefill_ids = tokenizer("Cache first", return_tensors="pt").input_ids
+        logits, kv_cache = _rpc_sync(
+            worker_rref,
+            rpc_server.RemoteWorker.run_prefill_with_cache_delta_remote,
+            prefill_ids,
+        )
+        print("Running decode – transferring *delta* KV cache each step…")
+        next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
+        for i in range(DECODE_STEPS):
+            print(f"Decode step {i+1}…")
+            logits, compressed_delta = _rpc_sync(
+                worker_rref,
+                rpc_server.RemoteWorker.run_decode_step_with_cache_delta_remote,
+                next_token,
+            )
+            # Decompress delta and update local KV cache
+            start_t = time.perf_counter()
+            delta_cache = torch.load(io.BytesIO(zstd.decompress(compressed_delta)))
+            _COMPRESS_MS += (time.perf_counter() - start_t) * 1000.0
+            kv_cache = _apply_delta_to_kv_cache(kv_cache, delta_cache)
+            next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
+        print("Decode complete.")
+    else:
+        raise ValueError("Unknown phase for remote_cache_delta")
+
+    net_bytes = _collect_net_bytes()
+    timing_metrics = _rpc_sync(worker_rref, rpc_server.RemoteWorker.get_timing_metrics_remote)
+    rpc_time_ms = _collect_rpc_time_ms()
+    _rpc_sync(worker_rref, rpc_server.RemoteWorker.reset_metrics_remote)
+    avg_sm = _rpc_sync(worker_rref, rpc_server.RemoteWorker.stop_gpu_monitor_remote)
+
+    print(f"RPC_TIME_MS: {rpc_time_ms}")
+    print(f"CLIENT_SERDES_MS: {_COMPRESS_MS}")
+    print(f"NETWORK_BYTES: {net_bytes}")
+    print(f"AVG_SM_UTIL: {avg_sm}")
+    _COMPRESS_MS = 0.0
+    _rpc_sync(worker_rref, rpc_server.RemoteWorker.reset_state_remote)
+    _shutdown_rpc()
+
 def main(argv: List[str] | None = None):
     args = _parse_args(argv)
     if args.mode == "local":
@@ -606,6 +684,8 @@ def main(argv: List[str] | None = None):
         _run_remote_cache(args)
     elif args.mode == "remote_cache_compressed":
         _run_remote_cache_compressed(args)
+    elif args.mode == "remote_cache_delta":
+        _run_remote_cache_delta(args)
     elif args.mode == "sys_simulated":
         _run_sys_simulated(args)
     else:
