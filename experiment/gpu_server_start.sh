@@ -49,7 +49,6 @@ fi
 # GPU mapping per mode (modify as needed for your host)
 declare -A GPU_IDX=(
   [naive]=0
-  [remote_cache_delta]=1
   [remote_cache_delta_compressed]=1
   [sys_simulated]=2
 )
@@ -93,9 +92,8 @@ PORT_STRIDE=50  # Must match value in experiment_driver.py
 # Base port mapping (one server per mode)
 declare -A BASE_PORTS=(
   [naive]=29500
-  [remote_cache]=29510
   [sys_simulated]=29520
-  [remote_cache_delta]=29530
+  [remote_cache_delta_compressed]=29530
 )
 
 # Initialize PID file
