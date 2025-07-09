@@ -6,7 +6,7 @@
 set -e  # Exit on any error
 
 # Configuration
-MODEL="EleutherAI/gpt-j-6B"
+MODEL="gpt2"  # Use smaller model by default to avoid GPU memory issues
 TRIALS=1
 GPU_HOST="10.8.162.218"
 BASE_PORT=29500

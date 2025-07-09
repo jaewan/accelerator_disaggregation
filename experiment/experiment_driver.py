@@ -76,86 +76,58 @@ class ServerPool:
         self.model = model
         self.master_addr = master_addr
         self.base_port = base_port
-        self.servers: Dict[int, ProcessHandle] = {}
-        # Map (mode, phase) -> port. Each decode phase gets an additional +5 port
-        # offset to avoid TensorPipe stale-socket dead-locks when a new client
-        # process reconnects to the same server.
-        self.ports: Dict[tuple[str, str], int] = {}
-
-        mode_offsets = {"naive": 0, "remote_cache": 10, "remote_cache_delta": 30, "sys_simulated": 20}
-        phase_offsets = {"prefill": 0, "decode": 5}
-
-        for mode in modes:
-            if mode == "local":
-                continue  # local baseline runs entirely on the client
-
-            base_offset = mode_offsets.get(mode, 30)
-            for phase, p_off in phase_offsets.items():
-                self.ports[(mode, phase)] = base_port + base_offset + p_off
+        self.server: ProcessHandle | None = None
+        
+        # For simplicity, use a single server process that can handle all modes
+        # This prevents GPU memory issues from multiple processes loading the same model
+        self.server_port = base_port
     
     def __enter__(self) -> "ServerPool":
-        """Start all required servers."""
-        started: set[int] = set()
-        
-        # Start servers sequentially to prevent simultaneous model loading
-        # which can cause GPU OOM errors
-        for (mode, phase), port in sorted(self.ports.items()):
-            # Avoid launching the same port twice if multiple (mode, phase) map to it
-            if port in started:
-                continue
-            print(f"Starting persistent server for {mode}-{phase} on port {port}...")
+        """Start a single server that can handle all modes."""
+        # Skip server startup if only local mode is requested
+        if set(self.modes) == {"local"}:
+            return self
             
-            try:
-                server = _start_rpc_server(self.model, self.master_addr, str(port))
-                self.servers[port] = server
-                started.add(port)
-                
-                # Add delay between server starts to prevent simultaneous model loading
-                # This is critical for large models like GPT-J-6B which use ~12GB GPU memory
-                print(f"Server on port {port} started successfully. Waiting before starting next server...")
-                time.sleep(5.0)
-                
-            except RuntimeError as e:
-                print(f"Failed to start server on port {port}: {e}")
-                # Clean up any servers that were started successfully
-                for cleanup_port, cleanup_server in self.servers.items():
-                    print(f"Cleaning up server on port {cleanup_port}...")
-                    try:
-                        cleanup_server.terminate()
-                    except Exception as cleanup_e:
-                        print(f"Warning: Error cleaning up server on port {cleanup_port}: {cleanup_e}")
-                self.servers.clear()
-                
-                # If it's a GPU memory issue, provide helpful error message
-                if "GPU memory" in str(e) or "OutOfMemoryError" in str(e):
-                    raise RuntimeError(
-                        f"GPU out of memory while starting servers. "
-                        f"Try reducing the number of concurrent servers or use a smaller model. "
-                        f"Current model: {self.model}"
-                    ) from e
-                else:
-                    raise e
+        print(f"Starting single persistent server on port {self.server_port} for all modes...")
         
-        # Give servers additional time to fully initialize
-        if self.servers:
-            print("Waiting for all servers to fully initialize...")
+        try:
+            self.server = _start_rpc_server(self.model, self.master_addr, str(self.server_port))
+            print(f"Server started successfully on port {self.server_port}")
+            
+            # Give server time to fully initialize
+            print("Waiting for server to fully initialize...")
             time.sleep(10.0)
+            
+        except RuntimeError as e:
+            print(f"Failed to start server on port {self.server_port}: {e}")
+            
+            # If it's a GPU memory issue, provide helpful error message
+            if "GPU memory" in str(e) or "OutOfMemoryError" in str(e):
+                raise RuntimeError(
+                    f"GPU out of memory while starting server. "
+                    f"Try using a smaller model or ensure GPU memory is available. "
+                    f"Current model: {self.model}"
+                ) from e
+            else:
+                raise e
         
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Terminate all servers."""
-        for port, server in self.servers.items():
-            print(f"Terminating persistent server on port {port}…")
+        """Terminate the server."""
+        if self.server is not None:
+            print(f"Terminating persistent server on port {self.server_port}…")
             try:
-                server.terminate()
+                self.server.terminate()
             except Exception as e:
-                print(f"Warning: Error terminating server on port {port}: {e}")
-        self.servers.clear()
+                print(f"Warning: Error terminating server on port {self.server_port}: {e}")
+            self.server = None
 
     def get_port(self, mode: str, phase: str) -> str:
-        """Return the port allocated for (mode, phase)."""
-        return str(self.ports.get((mode, phase), self.base_port))
+        """Return the port for the single server (all modes use the same server)."""
+        if mode == "local":
+            return str(self.base_port)  # Not used for local mode
+        return str(self.server_port)
 
 
 # --------------------------------------------------------------------------------------
