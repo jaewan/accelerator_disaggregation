@@ -23,7 +23,7 @@ set -eu
 
 # Root of the experiment repository (default: current directory)
 ROOT="${ROOT:-$(pwd)}"
-MODEL="${MODEL:-sshleifer/tiny-gpt2}"
+MODEL="${MODEL:-EleutherAI/gpt-j-6B}"
 VENV_ACTIVATE="${VENV_ACTIVATE:-venv/bin/activate}"
 
 cd "$ROOT"

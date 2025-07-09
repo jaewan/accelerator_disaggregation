@@ -9,7 +9,7 @@
 #
 # Environment variables recognised:
 #   GPU_HOST         IP of the GPU server (default: 10.8.162.218)
-#   MODEL            HF model name/path (default: sshleifer/tiny-gpt2)
+#   MODEL            HF model name/path (default: EleutherAI/gpt-j-6B)
 #   ROOT             Repository root (default: current directory)
 #   VENV_ACTIVATE    Path to venv/conda activate script (default: venv/bin/activate)
 
@@ -18,7 +18,7 @@ set -eu
 ROOT="${ROOT:-$(pwd)}"
 # Hostname/IP used by Torch RPC (must resolve via DNS).  Override if needed.
 GPU_HOST="${GPU_HOST:-10.8.162.218}"
-MODEL="${MODEL:-sshleifer/tiny-gpt2}"
+MODEL="${MODEL:-EleutherAI/gpt-j-6B}"
 VENV_ACTIVATE="${VENV_ACTIVATE:-venv/bin/activate}"
 
 cd "$ROOT"
