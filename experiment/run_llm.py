@@ -32,8 +32,6 @@ import io
 # on the remote side.
 # ----------------------------------------------------------------------------------
 
-DECODE_STEPS = 50  # number of decode iterations when phase==decode
-
 logging.basicConfig(
     level=logging.INFO,
     format="[%(asctime)s] %(levelname)s %(message)s",
@@ -211,6 +209,7 @@ def _parse_args(argv: List[str] | None = None):
     parser.add_argument("--phase", required=True, choices=["prefill", "decode"])
     parser.add_argument("--model", default="EleutherAI/gpt-j-6B")
     parser.add_argument("--prompt", default="The quick brown fox jumps over the lazy dog. " * 8)
+    parser.add_argument("--decode_steps", type=int, default=50, help="Number of decode steps to run in decode phase.")
     parser.add_argument("--gpu_host", default="127.0.0.1")
     parser.add_argument("--master_port", default="29500")
     parser.add_argument("--backend", choices=["gloo", "nccl"], default="gloo")
@@ -337,7 +336,7 @@ def _run_naive_remote(args):
 
     # Call the stateless remote forward. If --skip_weight_upload was set we
     # are sending an empty dict, otherwise the full weights.
-    for _ in range(1 if args.phase == "prefill" else DECODE_STEPS):
+    for _ in range(1 if args.phase == "prefill" else args.decode_steps):
         logits, kv_cache = _rpc_sync(
             worker_rref,
             rpc_server.RemoteWorker.run_stateless_forward_remote,
@@ -429,7 +428,7 @@ def _run_remote_cache(args):
 
         print("Running decode – transferring KV cache every step (uncompressed)…")
         next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
-        for i in range(DECODE_STEPS):
+        for i in range(args.decode_steps):
             print(f"Decode step {i+1}…")
             logits, kv_cache = _rpc_sync(
                 worker_rref,
@@ -510,7 +509,7 @@ def _run_remote_cache_compressed(args):
 
         print("Running decode – transferring compressed KV cache every step…")
         next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
-        for i in range(DECODE_STEPS):
+        for i in range(args.decode_steps):
             print(f"Decode step {i+1}…")
             logits, compressed_kv_cache = _rpc_sync(
                 worker_rref,
@@ -580,7 +579,7 @@ def _run_sys_simulated(args):
     logits = _decompress_tensor(logits_blob)
 
     if args.phase == "decode":
-        for _ in range(DECODE_STEPS):
+        for _ in range(args.decode_steps):
             next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
             token_blob = _compress_tensor(next_token)
             logits_blob, kv_id = _rpc_sync(
@@ -665,7 +664,7 @@ def _run_remote_cache_delta_raw(args):
         )
         print("Running decode – transferring *delta* KV cache each step (raw)…")
         next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
-        for i in range(DECODE_STEPS):
+        for i in range(args.decode_steps):
             print(f"Decode step {i+1}…")
             logits, delta_cache = _rpc_sync(
                 worker_rref,
@@ -730,7 +729,7 @@ def _run_remote_cache_delta_compressed(args):
         )
         print("Running decode – transferring *delta* KV cache each step (compressed)…")
         next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
-        for i in range(DECODE_STEPS):
+        for i in range(args.decode_steps):
             print(f"Decode step {i+1}…")
             logits, compressed_delta = _rpc_sync(
                 worker_rref,
@@ -802,7 +801,7 @@ def _run_remote_cache_handle(args):
         )
 
         next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
-        for step in range(DECODE_STEPS):
+        for step in range(args.decode_steps):
             print(f"Decode step {step+1}…")
             logits = _rpc_sync(
                 worker_rref,
