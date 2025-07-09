@@ -327,6 +327,29 @@ class RemoteWorker:
         # we keep the resident weights and avoid the expensive copy.
         if state_dict:
             self.model.load_state_dict(state_dict, strict=False)  # type: ignore[attr-defined]
+
+        # ------------------------------------------------------------------
+        # NEW: ensure the (potentially still skeleton) model resides on the
+        # *GPU* before we execute the forward pass.  In the stateless naive
+        # baseline we may never call ``download_weights_remote`` when the
+        # client passes ``--skip_weight_upload``.  In that case the global
+        # model would remain on CPU and each forward run would be executed on
+        # the host, leading to extremely long runtimes and client-side
+        # timeouts.  Moving the model once is inexpensive compared to the 6B
+        # parameter compute and avoids the 30-minute timeout.
+        # ------------------------------------------------------------------
+        if next(self.model.parameters()).device.type == "cpu":  # type: ignore[arg-type]
+            try:
+                LOGGER.info("Moving stateless model to %s for naive baseline", self.device)
+                self.model = self.model.to(self.device)  # type: ignore[assignment]
+            except torch.cuda.OutOfMemoryError as oom:
+                LOGGER.error(
+                    "GPU OOM while moving model for stateless forward. "
+                    "Consider assigning the naive baseline to a larger GPU or "
+                    "enable weight uploads instead."
+                )
+                raise oom
+
         load_t = time.time() - start
 
         input_ids = input_ids.to(self.device, non_blocking=True)
