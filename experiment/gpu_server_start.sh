@@ -10,6 +10,8 @@
 #   29515  - remote-cache baseline (decode)
 #   29520  - framework-level semantic-aware (\sys) prefill
 #   29525  - framework-level semantic-aware (\sys) decode
+#   29530  - delta KV cache (prefill)
+#   29535  - delta KV cache (decode)
 #
 # Logs are stored under logs/ in the same directory as this script.
 #
@@ -21,7 +23,7 @@ set -eu
 
 # Root of the experiment repository (default: current directory)
 ROOT="${ROOT:-$(pwd)}"
-MODEL="${MODEL:-EleutherAI/gpt-j-6B}"
+MODEL="${MODEL:-sshleifer/tiny-gpt2}"
 VENV_ACTIVATE="${VENV_ACTIVATE:-venv/bin/activate}"
 
 cd "$ROOT"

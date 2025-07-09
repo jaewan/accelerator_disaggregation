@@ -138,6 +138,23 @@ def _collect_net_bytes() -> int:
         print(f"[DEBUG] Strategy 2 failed: {e}", file=sys.stderr)
         pass
 
+    # Strategy 3: Try to access agent stats via alternative method
+    try:
+        import torch.distributed.rpc as rpc_module
+        agent = getattr(rpc_module, '_agent', None)
+        if agent is not None and hasattr(agent, 'get_metrics'):
+            metrics = agent.get_metrics()
+            print(f"[DEBUG] Strategy 3 alternative agent metrics:", metrics, file=sys.stderr)
+            sent = int(metrics.get("rpc.agent.sent_bytes", 0))
+            recv = int(metrics.get("rpc.agent.received_bytes", 0))
+            total = sent + recv
+            if total > 0:
+                print(f"[DEBUG] Strategy 3 found sent={sent}, recv={recv}, total={total} bytes", file=sys.stderr)
+                return total
+    except Exception as e:
+        print(f"[DEBUG] Strategy 3 failed: {e}", file=sys.stderr)
+        pass
+
     # Metrics not available – return 0 so downstream code still works.
     print("[DEBUG] No RPC metrics available, returning 0", file=sys.stderr)
     return 0
@@ -667,12 +684,16 @@ def _run_remote_cache_delta(args):
 
     net_bytes = _collect_net_bytes()
     timing_metrics = _rpc_sync(worker_rref, rpc_server.RemoteWorker.get_timing_metrics_remote)
+    server_gpu_ms = timing_metrics.get("gpu_kernel_ms", 0.0)
+    server_serdes_ms = timing_metrics.get("serdes_ms", 0.0)
     rpc_time_ms = _collect_rpc_time_ms()
     _rpc_sync(worker_rref, rpc_server.RemoteWorker.reset_metrics_remote)
     avg_sm = _rpc_sync(worker_rref, rpc_server.RemoteWorker.stop_gpu_monitor_remote)
 
-    print(f"RPC_TIME_MS: {rpc_time_ms}")
+    print(f"SERVER_GPU_KERNEL_MS: {server_gpu_ms}")
+    print(f"SERVER_SERDES_MS: {server_serdes_ms}")
     print(f"CLIENT_SERDES_MS: {_COMPRESS_MS}")
+    print(f"RPC_TIME_MS: {rpc_time_ms}")
     print(f"NETWORK_BYTES: {net_bytes}")
     print(f"AVG_SM_UTIL: {avg_sm}")
     _COMPRESS_MS = 0.0
