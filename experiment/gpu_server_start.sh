@@ -21,6 +21,12 @@
 
 set -eu
 
+# Disable CUDA-specific TensorPipe channels so the handshake does not attempt
+# to negotiate a GPU-aware transport with the (CPU-only) client.  This is
+# benign for the GPU host – data still lives on the GPU – but removes an
+# entire class of connection-reset errors during capability negotiation.
+export TP_DISABLE_CUDA=1
+
 # Root of the experiment repository (default: current directory)
 ROOT="${ROOT:-$(pwd)}"
 MODEL="${MODEL:-EleutherAI/gpt-j-6B}"
@@ -36,15 +42,21 @@ fi
 
 mkdir -p logs
 
-# Detect whether GPUs are available and choose the appropriate backend for
-# the process-group that RPC implicitly creates.  This does *not* change the
-# RPC transport (still TensorPipe) but ensures NCCL is initialised so that
-# tensors live on GPU by default.
-if command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi -L >/dev/null 2>&1; then
-  BACKEND="nccl"
-else
-  BACKEND="gloo"
-fi
+# ----------------------------------------------------------------------------
+# RPC communication backend
+# ----------------------------------------------------------------------------
+# The server and *all* clients in the same RPC world must pick the *same*
+# backend ("gloo" or "nccl").  Using NCCL on the GPU host while the client
+# selects Gloo (default) causes the handshake to fail with "connection reset
+# by peer".
+#
+# You can override the backend when launching the script:
+#     BACKEND=gloo ./gpu_server_start.sh
+# If BACKEND is undefined we fall back to a safe default of "gloo" so that a
+# CPU-only client can always connect.
+# ----------------------------------------------------------------------------
+
+BACKEND="${BACKEND:-gloo}"
 
 # GPU mapping per mode (modify as needed for your host)
 declare -A GPU_IDX=(
