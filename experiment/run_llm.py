@@ -115,6 +115,7 @@ def _collect_net_bytes() -> int:
                     except (ValueError, TypeError):
                         continue
             if total > 0:
+                print(f"[DEBUG] Strategy 1 found {total} bytes", file=sys.stderr)
                 return total
         except Exception:  # pragma: no cover – best-effort only
             pass
@@ -130,11 +131,15 @@ def _collect_net_bytes() -> int:
             print("[DEBUG] _collect_net_bytes: fallback metrics from _get_current_rpc_agent:", metrics, file=sys.stderr)
             sent = int(metrics.get("rpc.agent.sent_bytes", 0))  # type: ignore[arg-type]
             recv = int(metrics.get("rpc.agent.received_bytes", 0))  # type: ignore[arg-type]
-            return sent + recv
-    except Exception:  # pragma: no cover
+            total = sent + recv
+            print(f"[DEBUG] Strategy 2 found sent={sent}, recv={recv}, total={total} bytes", file=sys.stderr)
+            return total
+    except Exception as e:  # pragma: no cover
+        print(f"[DEBUG] Strategy 2 failed: {e}", file=sys.stderr)
         pass
 
     # Metrics not available – return 0 so downstream code still works.
+    print("[DEBUG] No RPC metrics available, returning 0", file=sys.stderr)
     return 0
 
 
