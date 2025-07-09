@@ -46,10 +46,19 @@ else
   BACKEND="gloo"
 fi
 
+# GPU mapping per mode (modify as needed for your host)
+declare -A GPU_IDX=(
+  [naive]=0
+  [remote_cache_delta]=1
+  [sys_simulated]=2
+)
+
 start_server() {
   local port="$1"
   local logfile="$2"
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Launching rpc_server on port ${port}"
+  local gpu_id="$3"
+
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Launching rpc_server on port ${port} on GPU ${gpu_id}"
   
   # Check if port is already in use
   if lsof -i ":${port}" >/dev/null 2>&1; then
@@ -57,7 +66,7 @@ start_server() {
     return 1
   fi
   
-  nohup python rpc_server.py \
+  CUDA_VISIBLE_DEVICES="${gpu_id}" nohup python rpc_server.py \
         --model "$MODEL" \
         --master_addr 0.0.0.0 \
         --master_port "$port" \
@@ -67,17 +76,13 @@ start_server() {
         > "logs/${logfile}" 2>&1 &
   
   local pid=$!
-  # Save PID for later termination
   echo $pid >> "logs/gpu_server_pids.txt"
-  
-  # Brief wait to check if process started successfully
   sleep 1
   if ! kill -0 "$pid" 2>/dev/null; then
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: Failed to start server on port ${port}"
     return 1
   fi
-  
-  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Server started on port ${port} with PID ${pid}"
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Server started on port ${port} with PID ${pid} (GPU ${gpu_id})"
 }
 
 # How many trials worth of servers to launch (default 1, override with TRIALS=n)
@@ -103,7 +108,8 @@ for ((t=0; t<TRIALS; t++)); do
     base_port=${BASE_PORTS[$key]}
     port=$((base_port + offset))
     logfile="${key}_trial$((t+1)).log"
-    if ! start_server "$port" "$logfile"; then
+    gpu_id=${GPU_IDX[$key]:-0}
+    if ! start_server "$port" "$logfile" "$gpu_id"; then
       failed_servers=$((failed_servers + 1))
     fi
   done

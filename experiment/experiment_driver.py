@@ -484,9 +484,8 @@ def run_experiment(args):
     MODE_DEFS: Dict[str, str] = {
         "local": "Local (Baseline)",
         "naive": "Semantic-Blind (Naive)",
-        "remote_cache": "Semantic-Blind + Realistic Remote Cache",
-        "remote_cache_compressed": "Semantic-Blind + Compressed Remote Cache",
-        "remote_cache_delta": "Semantic-Blind + Delta KV Cache",
+        "remote_cache_delta": "Semantic-Blind + Delta KV Cache (Uncompressed)",
+        "remote_cache_delta_compressed": "Semantic-Blind + Delta KV Cache (Compressed)",
         "sys_simulated": "Framework-Level Semantic-Aware (\\sys)",
     }
 
@@ -604,7 +603,7 @@ def run_experiment(args):
                         # --external_server is supplied.  Each decode server listens on
                         # `base_port + mode_offset + 5`.
                         base_port = int(args.master_port)
-                        mode_offset = {"naive": 0, "remote_cache": 10, "remote_cache_delta": 30, "sys_simulated": 20}.get(mode, 30)
+                        mode_offset = {"naive": 0, "remote_cache_delta": 30, "remote_cache_delta_compressed": 30, "sys_simulated": 20}.get(mode, 30)
 
                         # Additional per-trial offset to ensure we never reuse the exact same
                         # (ip, port, rank) rendez-vous across independent client processes.

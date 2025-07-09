@@ -207,7 +207,7 @@ LOGGER = logging.getLogger(__name__)
 
 def _parse_args(argv: List[str] | None = None):
     parser = argparse.ArgumentParser(description="Client orchestrator for LLM experiments")
-    parser.add_argument("--mode", required=True, choices=["local", "naive", "remote_cache", "remote_cache_compressed", "remote_cache_delta", "sys_simulated"])
+    parser.add_argument("--mode", required=True, choices=["local", "naive", "remote_cache", "remote_cache_compressed", "remote_cache_delta", "remote_cache_delta_compressed", "sys_simulated"])
     parser.add_argument("--phase", required=True, choices=["prefill", "decode"])
     parser.add_argument("--model", default="EleutherAI/gpt-j-6B")
     parser.add_argument("--prompt", default="The quick brown fox jumps over the lazy dog. " * 8)
@@ -711,6 +711,8 @@ def main(argv: List[str] | None = None):
     elif args.mode == "remote_cache_compressed":
         _run_remote_cache_compressed(args)
     elif args.mode == "remote_cache_delta":
+        _run_remote_cache_delta(args)
+    elif args.mode == "remote_cache_delta_compressed":
         _run_remote_cache_delta(args)
     elif args.mode == "sys_simulated":
         _run_sys_simulated(args)
