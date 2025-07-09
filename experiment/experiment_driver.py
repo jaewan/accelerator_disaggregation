@@ -505,8 +505,8 @@ def run_experiment(args):
         if not args.external_server:
             with ServerPool(selected, args.model, args.gpu_host, int(args.master_port)) as server_pool:
                 for trial in range(1, args.trials + 1):
-                    for phase in ("prefill", "decode"):
-                        for mode, mode_label in MODES:
+                    for mode, mode_label in MODES:
+                        for phase in ("prefill", "decode"):
                             print(f"Trial {trial} – {mode_label} {phase}…", flush=True)
 
                             # Paths for artefacts
@@ -588,8 +588,8 @@ def run_experiment(args):
         else:
             # Fallback to original behavior when external server is used
             for trial in range(1, args.trials + 1):
-                for phase in ("prefill", "decode"):
-                    for mode, mode_label in MODES:
+                for mode, mode_label in MODES:
+                    for phase in ("prefill", "decode"):
                         print(f"Trial {trial} – {mode_label} {phase}…", flush=True)
 
                         # Paths for artefacts
