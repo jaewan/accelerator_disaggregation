@@ -255,7 +255,20 @@ def _init_rpc(args):
     os.environ["MASTER_ADDR"] = args.gpu_host
     os.environ["MASTER_PORT"] = args.master_port
     
-    # Add retry logic for RPC initialization
+    import torch.distributed as dist
+
+    # Initialise default process group *once* before any RPC call so that
+    # the backend matches what the server expects.  We reuse the same
+    # init_method URL (MASTER_ADDR:MASTER_PORT) that RPC relies on.
+
+    if not dist.is_initialized():
+        dist.init_process_group(
+            backend=args.backend,
+            rank=1,
+            world_size=2,
+            init_method=f"tcp://{args.gpu_host}:{args.master_port}",
+        )
+
     for attempt in range(3):
         try:
             print(f"Initializing RPC connection to {args.gpu_host}:{args.master_port} (attempt {attempt + 1}/3)")

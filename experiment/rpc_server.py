@@ -865,6 +865,23 @@ def main(argv: List[str] | None = None):
         LOGGER.warning("NCCL selected but CUDA not available; falling back to GLOO")
         args.backend = "gloo"
 
+    # ------------------------------------------------------------------
+    # Explicitly initialise the default process-group *before* RPC so that
+    # both ranks (server = 0, client = 1) agree on the backend.  Relying on
+    # PyTorch’s implicit initialisation picks **NCCL** on GPU hosts and
+    # **GLOO** on CPU-only clients which results in an immediate
+    # "connection reset by peer" during the TensorPipe handshake.
+    # ------------------------------------------------------------------
+
+    import torch.distributed as dist
+
+    dist.init_process_group(
+        backend=args.backend,
+        rank=args.rank,
+        world_size=args.world_size,
+        init_method=f"tcp://{args.master_addr}:{args.master_port}",
+    )
+
     LOGGER.info(
         "Starting RPC server (name=GPU_WORKER, backend=%s, master=%s:%s)",
         args.backend,
