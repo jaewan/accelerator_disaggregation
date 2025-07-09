@@ -84,16 +84,12 @@ start_server() {
 TRIALS="${TRIALS:-1}"
 PORT_STRIDE=50  # Must match value in experiment_driver.py
 
-# Base port mapping (prefill / decode)
+# Base port mapping (one server per mode)
 declare -A BASE_PORTS=(
-  [naive_prefill]=29500
-  [naive_decode]=29505
-  [remote_cache_prefill]=29510
-  [remote_cache_decode]=29515
-  [sys_simulated_prefill]=29520
-  [sys_simulated_decode]=29525
-  [remote_cache_delta_prefill]=29530
-  [remote_cache_delta_decode]=29535
+  [naive]=29500
+  [remote_cache]=29510
+  [sys_simulated]=29520
+  [remote_cache_delta]=29530
 )
 
 # Initialize PID file

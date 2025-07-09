@@ -615,7 +615,8 @@ def run_experiment(args):
                         trial_offset = (trial - 1) * TRIAL_PORT_STRIDE
 
                         # Separate port for every decode phase (avoid stale sockets *within* a trial)
-                        phase_offset = 5 if phase == "decode" and mode != "local" else 0
+                        # We now use a single server per mode; prefill and decode share the same port.
+                        phase_offset = 0
 
                         run_port = str(base_port + mode_offset + phase_offset + trial_offset)
 
