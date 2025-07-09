@@ -25,7 +25,7 @@ python experiment_driver.py \
     --master_port $BASE_PORT \
     --model $MODEL \
     --output "results_$(date +%Y%m%d_%H%M%S).csv" \
-    --modes "naive,remote_cache_delta_compressed,sys_simulated" \
+    --modes "naive,remote_cache_delta_raw,remote_cache_handle" \
     --external_server
 
 echo "Experiment completed successfully!" 

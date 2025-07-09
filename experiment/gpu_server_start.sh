@@ -49,8 +49,8 @@ fi
 # GPU mapping per mode (modify as needed for your host)
 declare -A GPU_IDX=(
   [naive]=0
-  [remote_cache_delta_compressed]=1
-  [sys_simulated]=2
+  [remote_cache_delta_raw]=1
+  [remote_cache_handle]=2
 )
 
 start_server() {
@@ -92,8 +92,8 @@ PORT_STRIDE=50  # Must match value in experiment_driver.py
 # Base port mapping (one server per mode)
 declare -A BASE_PORTS=(
   [naive]=29500
-  [sys_simulated]=29520
-  [remote_cache_delta_compressed]=29530
+  [remote_cache_delta_raw]=29520
+  [remote_cache_handle]=29530
 )
 
 # We launch *two* servers per mode: one for prefill (base port) and one for

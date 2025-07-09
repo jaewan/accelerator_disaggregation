@@ -207,7 +207,7 @@ LOGGER = logging.getLogger(__name__)
 
 def _parse_args(argv: List[str] | None = None):
     parser = argparse.ArgumentParser(description="Client orchestrator for LLM experiments")
-    parser.add_argument("--mode", required=True, choices=["local", "naive", "remote_cache", "remote_cache_compressed", "remote_cache_delta_compressed", "sys_simulated"])
+    parser.add_argument("--mode", required=True, choices=["local", "naive", "remote_cache", "remote_cache_compressed", "remote_cache_delta_compressed", "remote_cache_delta_raw", "sys_simulated", "remote_cache_handle"])
     parser.add_argument("--phase", required=True, choices=["prefill", "decode"])
     parser.add_argument("--model", default="EleutherAI/gpt-j-6B")
     parser.add_argument("--prompt", default="The quick brown fox jumps over the lazy dog. " * 8)
@@ -766,6 +766,74 @@ def _run_remote_cache_delta_compressed(args):
     _shutdown_rpc()
 
 # -----------------------------------------------------------------------------
+# Handle-only semantic-aware mode (no compression, KV cache resident on GPU)
+# -----------------------------------------------------------------------------
+
+def _run_remote_cache_handle(args):
+    """Semantic-aware mode: keep KV cache on GPU and exchange only a handle."""
+
+    _init_rpc(args)
+    import rpc_server
+
+    # Create remote worker and ensure weights are present
+    worker_rref = rpc.remote("GPU_WORKER", rpc_server.RemoteWorker, args=(args.model,))
+    _rpc_sync(worker_rref, rpc_server.RemoteWorker.download_weights_remote, args.model)
+
+    # Start GPU monitoring
+    _rpc_sync(worker_rref, rpc_server.RemoteWorker.start_gpu_monitor_remote)
+
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+
+    if args.phase == "prefill":
+        input_ids = tokenizer(args.prompt, return_tensors="pt").input_ids
+        print("Running prefill (handle-only)…")
+        logits, kv_handle = _rpc_sync(
+            worker_rref,
+            rpc_server.RemoteWorker.run_prefill_with_handle,
+            input_ids,
+        )
+    elif args.phase == "decode":
+        # Warm-up prefill to obtain handle
+        prefill_ids = tokenizer("Handle warm-up", return_tensors="pt").input_ids
+        logits, kv_handle = _rpc_sync(
+            worker_rref,
+            rpc_server.RemoteWorker.run_prefill_with_handle,
+            prefill_ids,
+        )
+
+        next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
+        for step in range(DECODE_STEPS):
+            print(f"Decode step {step+1}…")
+            logits = _rpc_sync(
+                worker_rref,
+                rpc_server.RemoteWorker.run_decode_with_handle,
+                next_token,
+                kv_handle,
+            )
+            next_token = torch.argmax(logits[:, -1, :], dim=-1, keepdim=True)
+    else:
+        raise ValueError("Unknown phase for remote_cache_handle mode")
+
+    # Metrics
+    net_bytes = _collect_net_bytes()
+    timing_metrics = _rpc_sync(worker_rref, rpc_server.RemoteWorker.get_timing_metrics_remote)
+    server_gpu_ms = timing_metrics.get("gpu_kernel_ms", 0.0)
+    server_serdes_ms = timing_metrics.get("serdes_ms", 0.0)
+    rpc_time_ms = _collect_rpc_time_ms()
+
+    _rpc_sync(worker_rref, rpc_server.RemoteWorker.reset_metrics_remote)
+    avg_sm = _rpc_sync(worker_rref, rpc_server.RemoteWorker.stop_gpu_monitor_remote)
+
+    print(f"SERVER_GPU_KERNEL_MS: {server_gpu_ms}")
+    print(f"SERVER_SERDES_MS: {server_serdes_ms}")
+    print(f"CLIENT_SERDES_MS: 0.0")
+    print(f"RPC_TIME_MS: {rpc_time_ms}")
+    print(f"NETWORK_BYTES: {net_bytes}")
+    print(f"AVG_SM_UTIL: {avg_sm}")
+
+    _shutdown_rpc()
+
+# -----------------------------------------------------------------------------
 # MAIN DISPATCH: update mapping (remove previous alias)
 # -----------------------------------------------------------------------------
 
@@ -781,8 +849,12 @@ def main(argv: List[str] | None = None):
         _run_remote_cache_compressed(args)
     elif args.mode == "remote_cache_delta_compressed":
         _run_remote_cache_delta_compressed(args)
+    elif args.mode == "remote_cache_delta_raw":
+        _run_remote_cache_delta_raw(args)
     elif args.mode == "sys_simulated":
         _run_sys_simulated(args)
+    elif args.mode == "remote_cache_handle":
+        _run_remote_cache_handle(args)
     else:
         LOGGER.error("Unknown mode %s", args.mode)
         sys.exit(1)
