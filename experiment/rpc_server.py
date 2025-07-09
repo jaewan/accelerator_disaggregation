@@ -58,12 +58,20 @@ _KERNEL_CALLS: int = 0       # number of forward passes timed
 _METRIC_LOCK = threading.Lock()
 
 # Helper to update GPU timing counters in a thread-safe manner.
-def _record_gpu_time(delta_ms: float):
+def _record_gpu_time(delta_ms: float, instance=None):
     """Accumulate *delta_ms* into the global GPU kernel timer and increment call counter."""
     global _GPU_KERNEL_MS, _KERNEL_CALLS  # noqa: PLW0603
     with _METRIC_LOCK:
         _GPU_KERNEL_MS += delta_ms
         _KERNEL_CALLS += 1
+    
+    # Also track per-instance if provided (for GPU utilization calculation)
+    if instance is not None and hasattr(instance, '_kernel_ms_this_session'):
+        instance._kernel_ms_this_session += delta_ms
+        # Log every 10th call to avoid spam
+        if _KERNEL_CALLS % 10 == 0:
+            LOGGER.info("GPU timing update #%d: delta=%.2fms, instance_total=%.2fms", 
+                       _KERNEL_CALLS, delta_ms, instance._kernel_ms_this_session)
 
 class RemoteWorker:
     """Remote side logic that lives on GPU_HOST.
@@ -125,6 +133,7 @@ class RemoteWorker:
         # GPU monitoring state
         self._gpu_mon_proc: Optional[subprocess.Popen] = None
         self._dmon_csv: Optional[str] = None
+        self._kernel_ms_this_session: float = 0.0
 
     # ------------------------------------------------------------------
     # GPU monitoring utilities (started/stopped by the client via RPC)
@@ -142,8 +151,11 @@ class RemoteWorker:
             LOGGER.debug("GPU monitor already running; skipping start.")
             return
 
-        self._kernel_ms_baseline = _GPU_KERNEL_MS
+        # Reset instance-level counters for this monitoring session
+        self._kernel_ms_this_session = 0.0
         self._wall_start = time.perf_counter()
+        LOGGER.info("GPU monitor started: kernel_ms_this_session=%.2f, wall_start=%.2f",
+                   self._kernel_ms_this_session, self._wall_start)
 
         self._dmon_csv = f"/tmp/dmon_{uuid.uuid4().hex}.csv"
         cmd = [
@@ -208,14 +220,16 @@ class RemoteWorker:
         # 2) Fallback: derive utilisation from kernel timers if CSV failed or dmon missing.
         if util is None or util == 0.0:
             wall_ms = (time.perf_counter() - getattr(self, "_wall_start", time.perf_counter())) * 1000.0
+            kernel_ms_delta = self._kernel_ms_this_session
+            LOGGER.info("Fallback util calc: wall_ms=%.2f, kernel_ms_delta=%.2f", wall_ms, kernel_ms_delta)
             if wall_ms > 0:
-                with _METRIC_LOCK:
-                    kernel_ms_delta = _GPU_KERNEL_MS - getattr(self, "_kernel_ms_baseline", 0.0)
                 util = min(100.0, 100.0 * kernel_ms_delta / wall_ms)
+                LOGGER.info("Calculated utilization: %.2f%% (kernel/wall = %.2f/%.2f)", util, kernel_ms_delta, wall_ms)
             else:
                 util = 0.0
+                LOGGER.warning("Wall time is 0, cannot calculate utilization")
 
-        LOGGER.debug("GPU monitor stopped; avg SM util=%.2f%%", util)
+        LOGGER.info("GPU monitor stopped; avg SM util=%.2f%%", util)
         # Clean baseline attributes for next run
         self._wall_start = None  # type: ignore[attr-defined]
         return util
@@ -328,7 +342,7 @@ class RemoteWorker:
             if torch.cuda.is_available():
                 end_ev.record()  # type: ignore[arg-type]
                 torch.cuda.synchronize()
-                _record_gpu_time(start_ev.elapsed_time(end_ev))
+                _record_gpu_time(start_ev.elapsed_time(end_ev), self)
 
         logits = outputs.logits.cpu()
         pkv = self._move_kv_cache(outputs.past_key_values, torch.device("cpu"))
@@ -362,13 +376,13 @@ class RemoteWorker:
         if not _GLOBAL_WEIGHTS_LOADED:
             LOGGER.info("Downloading weights for model %s", model_name)
             full_model = AutoModelForCausalLM.from_pretrained(model_name)  # type: ignore[call-arg]
-            
+
             # Convert to the same dtype as our model
             if getattr(self.model, "dtype", torch.float32) == torch.float16:  # type: ignore[attr-defined]
                 full_model = full_model.half()  # type: ignore[attr-defined]
             elif getattr(self.model, "dtype", torch.float32) == torch.bfloat16:  # type: ignore[attr-defined]
                 full_model = full_model.to(dtype=torch.bfloat16)
-            
+
             # Move the (still CPU-resident) skeleton to GPU **once** and then
             # load the weights.  We re-use the same global model instance for
             # all RemoteWorkers within this process, so subsequent calls will
@@ -380,7 +394,7 @@ class RemoteWorker:
             self.model.load_state_dict(full_model.state_dict(), strict=False)  # type: ignore[attr-defined]
             self.weights_loaded = True
             _GLOBAL_WEIGHTS_LOADED = True
-            
+
             # Calculate size for logging
             total_size = sum(p.numel() * p.element_size() for p in self.model.parameters()) / 1e6  # type: ignore[attr-defined]
             LOGGER.info("Weights downloaded and loaded (%.2f MB)", total_size)
@@ -405,7 +419,7 @@ class RemoteWorker:
             if torch.cuda.is_available():
                 end_ev.record()  # type: ignore[arg-type]
                 torch.cuda.synchronize()
-                _record_gpu_time(start_ev.elapsed_time(end_ev))
+                _record_gpu_time(start_ev.elapsed_time(end_ev), self)
         logits = outputs.logits.cpu()
         kv_cache_id = str(uuid.uuid4())
         self.kv_cache_store[kv_cache_id] = self._move_kv_cache(outputs.past_key_values, torch.device("cpu"))
@@ -429,7 +443,7 @@ class RemoteWorker:
             if torch.cuda.is_available():
                 end_ev.record()  # type: ignore[arg-type]
                 torch.cuda.synchronize()
-                _record_gpu_time(start_ev.elapsed_time(end_ev))
+                _record_gpu_time(start_ev.elapsed_time(end_ev), self)
         logits = outputs.logits.cpu()
         # Update stored cache on CPU to minimise GPU memory footprint between calls.
         self.kv_cache_store[kv_cache_id] = self._move_kv_cache(outputs.past_key_values, torch.device("cpu"))
@@ -449,7 +463,7 @@ class RemoteWorker:
             if torch.cuda.is_available():
                 end_ev.record()  # type: ignore[arg-type]
                 torch.cuda.synchronize()
-                _record_gpu_time(start_ev.elapsed_time(end_ev))
+                _record_gpu_time(start_ev.elapsed_time(end_ev), self)
         logits = outputs.logits.cpu()
         kv_handle = str(uuid.uuid4())
         # Keep KV cache on GPU for realistic semantic-blind caching baseline
@@ -471,7 +485,7 @@ class RemoteWorker:
             if torch.cuda.is_available():
                 end_ev.record()  # type: ignore[arg-type]
                 torch.cuda.synchronize()
-                _record_gpu_time(start_ev.elapsed_time(end_ev))
+                _record_gpu_time(start_ev.elapsed_time(end_ev), self)
         logits = outputs.logits.cpu()
         kv_cache = self._move_kv_cache(outputs.past_key_values, torch.device("cpu"))
         LOGGER.debug("Prefill with cache complete; returning actual KV cache tensors")
@@ -495,7 +509,7 @@ class RemoteWorker:
             if torch.cuda.is_available():
                 end_ev.record()  # type: ignore[arg-type]
                 torch.cuda.synchronize()
-                _record_gpu_time(start_ev.elapsed_time(end_ev))
+                _record_gpu_time(start_ev.elapsed_time(end_ev), self)
         logits = outputs.logits.cpu()
         # Update KV cache on GPU - stays resident remotely
         self.kv_cache_store[kv_handle] = outputs.past_key_values
@@ -518,7 +532,7 @@ class RemoteWorker:
             if torch.cuda.is_available():
                 end_ev.record()  # type: ignore[arg-type]
                 torch.cuda.synchronize()
-                _record_gpu_time(start_ev.elapsed_time(end_ev))
+                _record_gpu_time(start_ev.elapsed_time(end_ev), self)
         logits = outputs.logits.cpu()
         updated_kv_cache = self._move_kv_cache(outputs.past_key_values, torch.device("cpu"))
         return logits, updated_kv_cache
@@ -553,7 +567,7 @@ class RemoteWorker:
             if torch.cuda.is_available():
                 end_ev.record()  # type: ignore[arg-type]
                 torch.cuda.synchronize()
-                _record_gpu_time(start_ev.elapsed_time(end_ev))
+                _record_gpu_time(start_ev.elapsed_time(end_ev), self)
 
         logits = outputs.logits.cpu()
         logits_blob = self._compress_tensor(logits)
@@ -585,7 +599,7 @@ class RemoteWorker:
             if torch.cuda.is_available():
                 end_ev.record()  # type: ignore[arg-type]
                 torch.cuda.synchronize()
-                _record_gpu_time(start_ev.elapsed_time(end_ev))
+                _record_gpu_time(start_ev.elapsed_time(end_ev), self)
 
         logits = outputs.logits.cpu()
         logits_blob = self._compress_tensor(logits)
