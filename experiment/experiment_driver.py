@@ -116,7 +116,10 @@ class ServerPool:
         """Terminate all servers."""
         for port, server in self.servers.items():
             print(f"Terminating persistent server on port {port}…")
-            server.terminate()
+            try:
+                server.terminate()
+            except Exception as e:
+                print(f"Warning: Error terminating server on port {port}: {e}")
         self.servers.clear()
 
     def get_port(self, mode: str, phase: str) -> str:
@@ -152,13 +155,21 @@ def _start_rpc_server(model: str, master_addr: str, master_port: str) -> Process
     timestamp = int(time.time())
     log_path = logs_dir / f"server_{master_port}_{timestamp}.log"
     
+    # Check if port is already in use before starting
+    import socket
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+            s.bind((master_addr, int(master_port)))
+    except OSError:
+        raise RuntimeError(f"Port {master_port} is already in use")
+    
     with log_path.open("w") as log_file:
         popen = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT)
 
     # Wait for server to be ready instead of using a fixed sleep.
     handle = ProcessHandle(popen)
     try:
-        for _ in range(1800):  # Wait up to 30 minutes for large model downloads
+        for i in range(1800):  # Wait up to 30 minutes for large model downloads
             if popen.poll() is not None:
                 # Print last 20 lines of server log for debugging
                 if log_path.exists():
@@ -175,6 +186,9 @@ def _start_rpc_server(model: str, master_addr: str, master_port: str) -> Process
                 if "RPC server running" in log_content or "RemoteWorker ready" in log_content:
                     print("RPC server started successfully.")
                     return handle
+            # Print progress every 30 seconds
+            if i % 30 == 0 and i > 0:
+                print(f"Still waiting for RPC server to start... ({i}s elapsed)")
             time.sleep(1)
         print("\n--- server_stdout.log (last 20 lines) ---")
         if log_path.exists():
@@ -286,8 +300,8 @@ def _average_sm_util(csv_path: Path) -> float:
         return 0.0
 
 
-def _run_client(mode: str, phase: str, args) -> tuple[float, int, float]:
-    """Run client once, return (latency_seconds, network_bytes)."""
+def _run_client(mode: str, phase: str, args) -> tuple[float, dict]:
+    """Run client once, return (latency_seconds, metrics_dict)."""
     cmd_list = [
         sys.executable,
         "run_llm.py",
@@ -347,6 +361,7 @@ def _run_client(mode: str, phase: str, args) -> tuple[float, int, float]:
         # Find network bytes and avg_sm in output
         network_bytes = 0
         avg_sm = 0.0
+        metrics_dict = {}
         for line in lines:
             if line.startswith("NETWORK_BYTES:"):
                 network_bytes = int(line.split(":", 1)[1].strip())
@@ -355,8 +370,32 @@ def _run_client(mode: str, phase: str, args) -> tuple[float, int, float]:
                     avg_sm = float(line.split(":", 1)[1].strip().rstrip("%"))
                 except ValueError:
                     pass
+            elif line.startswith("SERVER_GPU_KERNEL_MS:"):
+                try:
+                    metrics_dict["server_gpu_kernel_ms"] = float(line.split(":", 1)[1].strip())
+                except ValueError:
+                    pass
+            elif line.startswith("SERVER_SERDES_MS:"):
+                try:
+                    metrics_dict["server_serdes_ms"] = float(line.split(":", 1)[1].strip())
+                except ValueError:
+                    pass
+            elif line.startswith("CLIENT_SERDES_MS:"):
+                try:
+                    metrics_dict["client_serdes_ms"] = float(line.split(":", 1)[1].strip())
+                except ValueError:
+                    pass
+            elif line.startswith("RPC_TIME_MS:"):
+                try:
+                    metrics_dict["rpc_time_ms"] = float(line.split(":", 1)[1].strip())
+                except ValueError:
+                    pass
         
-        return latency_sec, network_bytes, avg_sm
+        # Add basic metrics to dict
+        metrics_dict["network_bytes"] = network_bytes
+        metrics_dict["avg_sm"] = avg_sm
+        
+        return latency_sec, metrics_dict
         
     except subprocess.TimeoutExpired as e:
         print(f"\nERROR: Client script for mode='{mode}' phase='{phase}' timed out after {timeout_seconds}s.", file=sys.stderr)
@@ -476,7 +515,7 @@ def run_experiment(args):
                                         try:
                                             # Run client and measure latency
                                             start_ts = time.time()
-                                            latency_sec, _net_bytes_placeholder, avg_sm = _run_client(mode, phase, client_args)
+                                            latency_sec, metrics_dict = _run_client(mode, phase, client_args)
                                             run_wall = time.time() - start_ts
                                         finally:
                                             # Ensure tcpdump is stopped even on failure
@@ -506,8 +545,12 @@ def run_experiment(args):
                                             "mode": mode_label,
                                             "latency_s": latency_sec,
                                             "wall_s": run_wall,
-                                            "net_bytes": net_bytes,
-                                            "avg_sm": avg_sm,
+                                            "net_bytes": metrics_dict.get("network_bytes", net_bytes),
+                                            "server_gpu_kernel_ms": metrics_dict.get("server_gpu_kernel_ms", 0.0),
+                                            "server_serdes_ms": metrics_dict.get("server_serdes_ms", 0.0),
+                                            "client_serdes_ms": metrics_dict.get("client_serdes_ms", 0.0),
+                                            "rpc_time_ms": metrics_dict.get("rpc_time_ms", 0.0),
+                                            "avg_sm": metrics_dict.get("avg_sm", 0.0),
                                         })
                                         break  # exit retry loop on success
                                     except Exception as e:
@@ -565,7 +608,7 @@ def run_experiment(args):
 
                                     try:
                                         start_ts = time.time()
-                                        latency_sec, _net_bytes_placeholder, avg_sm = _run_client(mode, phase, client_args)
+                                        latency_sec, metrics_dict = _run_client(mode, phase, client_args)
                                         run_wall = time.time() - start_ts
                                     finally:
                                         tcpdump_proc.terminate()
@@ -593,8 +636,12 @@ def run_experiment(args):
                                         "mode": mode_label,
                                         "latency_s": latency_sec,
                                         "wall_s": run_wall,
-                                        "net_bytes": net_bytes,
-                                        "avg_sm": avg_sm,
+                                        "net_bytes": metrics_dict.get("network_bytes", net_bytes),
+                                        "server_gpu_kernel_ms": metrics_dict.get("server_gpu_kernel_ms", 0.0),
+                                        "server_serdes_ms": metrics_dict.get("server_serdes_ms", 0.0),
+                                        "client_serdes_ms": metrics_dict.get("client_serdes_ms", 0.0),
+                                        "rpc_time_ms": metrics_dict.get("rpc_time_ms", 0.0),
+                                        "avg_sm": metrics_dict.get("avg_sm", 0.0),
                                     })
                                     break  # exit retry loop on success
                                 except Exception as e:
@@ -609,7 +656,9 @@ def run_experiment(args):
         raise
 
     # Write output CSV
-    fieldnames = ["trial", "phase", "mode", "latency_s", "wall_s", "net_bytes", "avg_sm"]
+    fieldnames = ["trial", "phase", "mode", "latency_s", "wall_s", "net_bytes", 
+                  "server_gpu_kernel_ms", "server_serdes_ms", "client_serdes_ms", 
+                  "rpc_time_ms", "avg_sm"]
     with open(args.output, "w", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()

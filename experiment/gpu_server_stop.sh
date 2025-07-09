@@ -15,12 +15,18 @@ if [[ ! -f "$PID_FILE" ]]; then
 fi
 
 while read -r pid; do
+  # Skip empty lines
+  if [[ -z "$pid" ]]; then
+    continue
+  fi
+  
   if kill -0 "$pid" 2>/dev/null; then
     echo "Stopping rpc_server process with PID $pid…"
     kill "$pid"
     # Wait up to 5 seconds
     for _ in {1..5}; do
       if ! kill -0 "$pid" 2>/dev/null; then
+        echo "Process $pid stopped gracefully."
         break
       fi
       sleep 1
@@ -30,6 +36,8 @@ while read -r pid; do
       echo "Process $pid did not exit gracefully – killing."
       kill -9 "$pid" || true
     fi
+  else
+    echo "Process $pid is not running (already stopped)."
   fi
 done < "$PID_FILE"
 

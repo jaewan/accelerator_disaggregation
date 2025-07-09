@@ -48,6 +48,13 @@ start_server() {
   local port="$1"
   local logfile="$2"
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] Launching rpc_server on port ${port}"
+  
+  # Check if port is already in use
+  if lsof -i ":${port}" >/dev/null 2>&1; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARNING: Port ${port} is already in use, skipping"
+    return 1
+  fi
+  
   nohup python rpc_server.py \
         --model "$MODEL" \
         --master_addr 0.0.0.0 \
@@ -56,8 +63,19 @@ start_server() {
         --rank 0 \
         --backend "$BACKEND" \
         > "logs/${logfile}" 2>&1 &
+  
+  local pid=$!
   # Save PID for later termination
-  echo $! >> "logs/gpu_server_pids.txt"
+  echo $pid >> "logs/gpu_server_pids.txt"
+  
+  # Brief wait to check if process started successfully
+  sleep 1
+  if ! kill -0 "$pid" 2>/dev/null; then
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] ERROR: Failed to start server on port ${port}"
+    return 1
+  fi
+  
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] Server started on port ${port} with PID ${pid}"
 }
 
 # How many trials worth of servers to launch (default 1, override with TRIALS=n)
@@ -74,6 +92,10 @@ declare -A BASE_PORTS=(
   [sys_simulated_decode]=29525
 )
 
+# Initialize PID file
+echo > "logs/gpu_server_pids.txt"
+
+failed_servers=0
 for ((t=0; t<TRIALS; t++)); do
   offset=$((t * PORT_STRIDE))
 
@@ -81,8 +103,15 @@ for ((t=0; t<TRIALS; t++)); do
     base_port=${BASE_PORTS[$key]}
     port=$((base_port + offset))
     logfile="${key}_trial$((t+1)).log"
-    start_server "$port" "$logfile"
+    if ! start_server "$port" "$logfile"; then
+      failed_servers=$((failed_servers + 1))
+    fi
   done
 done
 
-echo "[$(date '+%Y-%m-%d %H:%M:%S')] All RPC servers started." 
+if [ $failed_servers -gt 0 ]; then
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARNING: ${failed_servers} server(s) failed to start"
+  exit 1
+else
+  echo "[$(date '+%Y-%m-%d %H:%M:%S')] All RPC servers started successfully."
+fi 

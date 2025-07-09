@@ -73,6 +73,13 @@ def _record_gpu_time(delta_ms: float, instance=None):
             LOGGER.info("GPU timing update #%d: delta=%.2fms, instance_total=%.2fms", 
                        _KERNEL_CALLS, delta_ms, instance._kernel_ms_this_session)
 
+# Helper to update serdes timing counters in a thread-safe manner.
+def _record_serdes_time(delta_ms: float):
+    """Accumulate *delta_ms* into the global serdes timer."""
+    global _SERDES_MS  # noqa: PLW0603
+    with _METRIC_LOCK:
+        _SERDES_MS += delta_ms
+
 class RemoteWorker:
     """Remote side logic that lives on GPU_HOST.
 
@@ -278,8 +285,6 @@ class RemoteWorker:
 
     def _compress_tensor(self, tensor):
         """Compress tensor via torch.save while tracking (de)serialisation time."""
-        global _SERDES_MS  # noqa: PLW0603
-
         start_t = time.perf_counter()
 
         if tensor.dtype != torch.float16:
@@ -289,23 +294,19 @@ class RemoteWorker:
         torch.save(tensor.cpu(), buffer)
         compressed = zstd.compress(buffer.getvalue(), level=3)
 
-        with _METRIC_LOCK:
-            _SERDES_MS += (time.perf_counter() - start_t) * 1000.0  # ms
+        _record_serdes_time((time.perf_counter() - start_t) * 1000.0)
 
         return compressed
 
     def _decompress_tensor(self, compressed_data):
         """Inverse of _compress_tensor with timing."""
-        global _SERDES_MS  # noqa: PLW0603
-
         start_t = time.perf_counter()
 
         decompressed = zstd.decompress(compressed_data)
         buffer = io.BytesIO(decompressed)
         tensor = torch.load(buffer)
 
-        with _METRIC_LOCK:
-            _SERDES_MS += (time.perf_counter() - start_t) * 1000.0  # ms
+        _record_serdes_time((time.perf_counter() - start_t) * 1000.0)
 
         return tensor.to(self.device)
 
@@ -511,15 +512,13 @@ class RemoteWorker:
         kv_cache = self._move_kv_cache(outputs.past_key_values, torch.device("cpu"))
         
         # Compress KV cache using semantic-blind compression (no FP32→FP16 conversion)
-        global _SERDES_MS  # noqa: PLW0603
         start_t = time.perf_counter()
         
         buffer = io.BytesIO()
         torch.save(kv_cache, buffer)
         compressed_kv = zstd.compress(buffer.getvalue(), level=3)
         
-        with _METRIC_LOCK:
-            _SERDES_MS += (time.perf_counter() - start_t) * 1000.0
+        _record_serdes_time((time.perf_counter() - start_t) * 1000.0)
         
         LOGGER.debug("Prefill with compressed cache complete; returning compressed KV cache")
         return logits, compressed_kv
@@ -575,15 +574,13 @@ class RemoteWorker:
         token_id = token_id.to(self.device, non_blocking=True)
         
         # Decompress KV cache
-        global _SERDES_MS  # noqa: PLW0603
         start_t = time.perf_counter()
         
         decompressed = zstd.decompress(compressed_kv_cache)
         buffer = io.BytesIO(decompressed)
         kv_cache = torch.load(buffer)
         
-        with _METRIC_LOCK:
-            _SERDES_MS += (time.perf_counter() - start_t) * 1000.0
+        _record_serdes_time((time.perf_counter() - start_t) * 1000.0)
         
         kv_cache = self._move_kv_cache(kv_cache, self.device)
 
@@ -610,8 +607,7 @@ class RemoteWorker:
         torch.save(updated_kv_cache, buffer)
         compressed_updated_kv = zstd.compress(buffer.getvalue(), level=3)
         
-        with _METRIC_LOCK:
-            _SERDES_MS += (time.perf_counter() - start_t) * 1000.0
+        _record_serdes_time((time.perf_counter() - start_t) * 1000.0)
         
         return logits, compressed_updated_kv
 

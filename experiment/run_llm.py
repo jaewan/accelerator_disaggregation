@@ -213,6 +213,8 @@ def _shutdown_rpc():
         except Exception as e:  # pragma: no cover – best-effort
             exc[0] = e
 
+    # Proceed with shutdown attempt - let the graceful shutdown handle any errors
+
     th = threading.Thread(target=_graceful, daemon=True)
     th.start()
     th.join(timeout=10.0)
