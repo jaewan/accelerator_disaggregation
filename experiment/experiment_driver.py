@@ -96,19 +96,50 @@ class ServerPool:
     def __enter__(self) -> "ServerPool":
         """Start all required servers."""
         started: set[int] = set()
-        for (mode, phase), port in self.ports.items():
+        
+        # Start servers sequentially to prevent simultaneous model loading
+        # which can cause GPU OOM errors
+        for (mode, phase), port in sorted(self.ports.items()):
             # Avoid launching the same port twice if multiple (mode, phase) map to it
             if port in started:
                 continue
             print(f"Starting persistent server for {mode}-{phase} on port {port}...")
-            server = _start_rpc_server(self.model, self.master_addr, str(port))
-            self.servers[port] = server
-            started.add(port)
+            
+            try:
+                server = _start_rpc_server(self.model, self.master_addr, str(port))
+                self.servers[port] = server
+                started.add(port)
+                
+                # Add delay between server starts to prevent simultaneous model loading
+                # This is critical for large models like GPT-J-6B which use ~12GB GPU memory
+                print(f"Server on port {port} started successfully. Waiting before starting next server...")
+                time.sleep(5.0)
+                
+            except RuntimeError as e:
+                print(f"Failed to start server on port {port}: {e}")
+                # Clean up any servers that were started successfully
+                for cleanup_port, cleanup_server in self.servers.items():
+                    print(f"Cleaning up server on port {cleanup_port}...")
+                    try:
+                        cleanup_server.terminate()
+                    except Exception as cleanup_e:
+                        print(f"Warning: Error cleaning up server on port {cleanup_port}: {cleanup_e}")
+                self.servers.clear()
+                
+                # If it's a GPU memory issue, provide helpful error message
+                if "GPU memory" in str(e) or "OutOfMemoryError" in str(e):
+                    raise RuntimeError(
+                        f"GPU out of memory while starting servers. "
+                        f"Try reducing the number of concurrent servers or use a smaller model. "
+                        f"Current model: {self.model}"
+                    ) from e
+                else:
+                    raise e
         
         # Give servers additional time to fully initialize
         if self.servers:
-            print("Waiting for servers to fully initialize...")
-            time.sleep(2.0)
+            print("Waiting for all servers to fully initialize...")
+            time.sleep(10.0)
         
         return self
     
@@ -163,8 +194,13 @@ def _start_rpc_server(model: str, master_addr: str, master_port: str) -> Process
     except OSError:
         raise RuntimeError(f"Port {master_port} is already in use")
     
+    # Set environment variables for better GPU memory management
+    env = os.environ.copy()
+    env["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+    env["CUDA_LAUNCH_BLOCKING"] = "1"  # For better error reporting
+    
     with log_path.open("w") as log_file:
-        popen = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT)
+        popen = subprocess.Popen(cmd, stdout=log_file, stderr=subprocess.STDOUT, env=env)
 
     # Wait for server to be ready instead of using a fixed sleep.
     handle = ProcessHandle(popen)
@@ -186,6 +222,11 @@ def _start_rpc_server(model: str, master_addr: str, master_port: str) -> Process
                 if "RPC server running" in log_content or "RemoteWorker ready" in log_content:
                     print("RPC server started successfully.")
                     return handle
+                # Check for OOM errors in the log
+                if "OutOfMemoryError" in log_content or "CUDA out of memory" in log_content:
+                    print(f"Server on port {master_port} failed due to GPU memory issues. Check log for details.")
+                    handle.terminate()
+                    raise RuntimeError(f"RPC server failed to start due to GPU memory issues. Port: {master_port}")
             # Print progress every 30 seconds
             if i % 30 == 0 and i > 0:
                 print(f"Still waiting for RPC server to start... ({i}s elapsed)")

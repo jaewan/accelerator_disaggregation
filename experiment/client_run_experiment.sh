@@ -1,50 +1,64 @@
-#!/usr/bin/env bash
-# client_run_experiment.sh
-# Executes the semantic-gap experiment (5 trials) against external RPC
-# servers started by gpu_server_start.sh.
-#
-# Usage:
-#   chmod +x client_run_experiment.sh
-#   ./client_run_experiment.sh
-#
-# Environment variables recognised:
-#   GPU_HOST         IP of the GPU server (default: 10.8.162.218)
-#   MODEL            HF model name/path (default: EleutherAI/gpt-j-6B)
-#   ROOT             Repository root (default: current directory)
-#   VENV_ACTIVATE    Path to venv/conda activate script (default: venv/bin/activate)
+#!/bin/bash
 
-set -eu
+# AI Accelerator Disaggregation Experiment Runner
+# This script runs the full experiment with proper GPU memory management
 
-ROOT="${ROOT:-$(pwd)}"
-# Hostname/IP used by Torch RPC (must resolve via DNS).  Override if needed.
-GPU_HOST="${GPU_HOST:-10.8.162.218}"
-MODEL="${MODEL:-EleutherAI/gpt-j-6B}"
-VENV_ACTIVATE="${VENV_ACTIVATE:-venv/bin/activate}"
+set -e  # Exit on any error
 
-cd "$ROOT"
+# Configuration
+MODEL="EleutherAI/gpt-j-6B"
+TRIALS=1
+GPU_HOST="10.8.162.218"
+BASE_PORT=29500
 
-# Activate virtual environment if present
-if [[ -f "$VENV_ACTIVATE" ]]; then
-  # shellcheck source=/dev/null
-  source "$VENV_ACTIVATE"
-fi
+# Set environment variables for better GPU memory management
+export PYTORCH_CUDA_ALLOC_CONF="expandable_segments:True"
+export CUDA_LAUNCH_BLOCKING="1"
 
-###############################################################################
-# Run the experiment (5 trials by default, three modes, two phases).  Every
-# trial now uses *distinct* port ranges (stride = 50) to avoid Gloo
-# stale-socket dead-locks.  Hence the GPU host must run one set of RPC
-# servers per trial.  Launch them with e.g.
-#   TRIALS=5 ./gpu_server_start.sh
-# before executing this client script.
-###############################################################################
+# Function to clean up GPU memory
+cleanup_gpu() {
+    echo "Cleaning up GPU memory..."
+    if command -v nvidia-smi &> /dev/null; then
+        nvidia-smi --gpu-reset || true
+    fi
+    # Kill any remaining Python processes that might be holding GPU memory
+    pkill -f "rpc_server.py" || true
+    pkill -f "run_llm.py" || true
+    sleep 2
+}
+
+# Function to check GPU memory
+check_gpu_memory() {
+    if command -v nvidia-smi &> /dev/null; then
+        echo "Current GPU memory usage:"
+        nvidia-smi --query-gpu=memory.used,memory.total --format=csv,noheader,nounits
+    fi
+}
+
+# Cleanup on exit
+trap cleanup_gpu EXIT
+
+echo "Starting AI Accelerator Disaggregation Experiment"
+echo "Model: $MODEL"
+echo "Trials: $TRIALS"
+echo "GPU Host: $GPU_HOST"
+echo "Base Port: $BASE_PORT"
+
+# Check initial GPU memory
+check_gpu_memory
+
+# Clean up any existing processes
+cleanup_gpu
+
+# Run the experiment with conservative memory management
+echo "Running experiment with conservative memory management..."
 python experiment_driver.py \
-       --trials "${TRIALS:-1}" \
-       --gpu_host "$GPU_HOST" \
-       --master_port 29500 \
-       --model "$MODEL" \
-       --modes naive,remote_cache,remote_cache_delta,sys_simulated \
-       --external_server \
-       --trial_port_stride "${TRIAL_PORT_STRIDE:-0}" \
-       --output stage2_results.csv
+    --trials $TRIALS \
+    --gpu_host $GPU_HOST \
+    --master_port $BASE_PORT \
+    --model $MODEL \
+    --output "results_$(date +%Y%m%d_%H%M%S).csv" \
+    --modes "local,naive,remote_cache,remote_cache_delta,sys_simulated"
 
-echo "Experiment complete. Results written to stage2_results.csv." 
+echo "Experiment completed successfully!"
+check_gpu_memory 

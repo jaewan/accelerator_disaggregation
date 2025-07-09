@@ -376,6 +376,12 @@ class RemoteWorker:
 
         if not _GLOBAL_WEIGHTS_LOADED:
             LOGGER.info("Downloading weights for model %s", model_name)
+            
+            # Clear GPU cache before loading new model
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+                torch.cuda.synchronize()
+            
             full_model = AutoModelForCausalLM.from_pretrained(model_name)  # type: ignore[call-arg]
 
             # Convert to the same dtype as our model
@@ -390,7 +396,20 @@ class RemoteWorker:
             # skip the costly transfer.
 
             if next(self.model.parameters()).device.type == "cpu":  # type: ignore[arg-type]
-                self.model = self.model.to(self.device)  # type: ignore[assignment]
+                try:
+                    self.model = self.model.to(self.device)  # type: ignore[assignment]
+                except torch.cuda.OutOfMemoryError:
+                    # If we run out of memory, try to free up space and retry
+                    LOGGER.warning("GPU OOM during model loading, attempting cleanup and retry...")
+                    torch.cuda.empty_cache()
+                    torch.cuda.synchronize()
+                    
+                    # Try to move model to GPU again
+                    try:
+                        self.model = self.model.to(self.device)  # type: ignore[assignment]
+                    except torch.cuda.OutOfMemoryError as e:
+                        LOGGER.error("Failed to load model after cleanup. GPU memory exhausted.")
+                        raise RuntimeError(f"GPU out of memory: {e}. Try reducing batch size or using fewer concurrent processes.") from e
 
             self.model.load_state_dict(full_model.state_dict(), strict=False)  # type: ignore[attr-defined]
             self.weights_loaded = True
@@ -399,12 +418,20 @@ class RemoteWorker:
             # Calculate size for logging
             total_size = sum(p.numel() * p.element_size() for p in self.model.parameters()) / 1e6  # type: ignore[attr-defined]
             LOGGER.info("Weights downloaded and loaded (%.2f MB)", total_size)
+            
+            # Clean up the full_model to free CPU memory
+            del full_model
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
         else:
             LOGGER.debug("Weights already loaded; skipping download.")
 
     def reset_state_remote(self) -> None:
         """Reset KV cache state between trials while keeping weights loaded."""
         self.kv_cache_store.clear()
+        # Clear GPU cache to free up memory
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
         LOGGER.debug("KV cache state reset (weights preserved)")
 
     def run_prefill_remote(self, token_ids: torch.Tensor):
