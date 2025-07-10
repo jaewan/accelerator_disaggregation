@@ -78,22 +78,43 @@ def main(argv: List[str] | None = None):
     model.eval()
 
     # ------------------------------------------------------------------
-    # Prefill
+    # Phase 1: Prefill (prompt → initial KV cache)
     # ------------------------------------------------------------------
     input_ids = tokenizer(args.prompt, return_tensors="pt").input_ids.to(device)
 
-    total_kernel_ms = 0.0
-    wall_start = time.perf_counter()
+    kernel_ms_prefill = 0.0
+    wall_prefill_start = time.perf_counter()
 
     with torch.no_grad():
         outputs, ms = _timed_forward(model, input_ids, use_cache=True)
-        total_kernel_ms += ms
+        kernel_ms_prefill += ms
         kv_cache = outputs.past_key_values  # type: ignore[attr-defined]
 
-        # ------------------------------------------------------------------
-        # Decode loop (autoregressive) – reuse kv_cache
-        # ------------------------------------------------------------------
-        next_token = torch.argmax(outputs.logits[:, -1, :], dim=-1, keepdim=True)  # type: ignore[attr-defined]
+    wall_prefill = time.perf_counter() - wall_prefill_start
+
+    util_prefill = 0.0
+    if device == "cuda" and wall_prefill > 0:
+        util_prefill = min(100.0, 100.0 * kernel_ms_prefill / (wall_prefill * 1000.0))
+
+    print("# ---- PREFILL ----")
+    print(f"GPU_KERNEL_MS: {kernel_ms_prefill}")
+    print("SERDES_MS: 0.0")
+    print("RPC_TIME_MS: 0.0")
+    print("CLIENT_SERDES_MS: 0.0")
+    print("SERVER_SERDES_MS: 0.0")
+    print("NETWORK_BYTES: 0")
+    print(f"AVG_SM_UTIL: {util_prefill}")
+    print(f"{wall_prefill}")
+
+    # ------------------------------------------------------------------
+    # Phase 2: Decode – autoregressive generation of *decode_steps* tokens
+    #           using the KV cache from prefill.
+    # ------------------------------------------------------------------
+    kernel_ms_decode = 0.0
+    wall_decode_start = time.perf_counter()
+
+    next_token = torch.argmax(outputs.logits[:, -1, :], dim=-1, keepdim=True)  # type: ignore[attr-defined]
+    with torch.no_grad():
         for _ in range(args.decode_steps):
             outputs, ms = _timed_forward(
                 model,
@@ -101,32 +122,25 @@ def main(argv: List[str] | None = None):
                 past_key_values=kv_cache,
                 use_cache=True,
             )
-            total_kernel_ms += ms
+            kernel_ms_decode += ms
             kv_cache = outputs.past_key_values  # type: ignore[attr-defined]
             next_token = torch.argmax(outputs.logits[:, -1, :], dim=-1, keepdim=True)  # type: ignore[attr-defined]
 
-    wall_s = time.perf_counter() - wall_start
+    wall_decode = time.perf_counter() - wall_decode_start
 
-    # Simple utilisation proxy: kernel active time / wall time
-    avg_sm_util = 0.0
-    if device == "cuda" and wall_s > 0:
-        avg_sm_util = min(100.0, 100.0 * total_kernel_ms / (wall_s * 1000.0))
+    util_decode = 0.0
+    if device == "cuda" and wall_decode > 0:
+        util_decode = min(100.0, 100.0 * kernel_ms_decode / (wall_decode * 1000.0))
 
-    # ------------------------------------------------------------------
-    # Print metrics in the same key:value format as run_llm.py so
-    # experiment_driver.py can parse them if desired.
-    # ------------------------------------------------------------------
-    print(f"GPU_KERNEL_MS: {total_kernel_ms}")
+    print("# ---- DECODE ----")
+    print(f"GPU_KERNEL_MS: {kernel_ms_decode}")
     print("SERDES_MS: 0.0")
     print("RPC_TIME_MS: 0.0")
     print("CLIENT_SERDES_MS: 0.0")
     print("SERVER_SERDES_MS: 0.0")
     print("NETWORK_BYTES: 0")
-    print(f"AVG_SM_UTIL: {avg_sm_util}")
-
-    # Final line = latency in seconds so that /usr/bin/time-parsing logic is
-    # consistent with other drivers if someone wraps this script.
-    print(f"{wall_s}")
+    print(f"AVG_SM_UTIL: {util_decode}")
+    print(f"{wall_decode}")
 
 
 if __name__ == "__main__":
