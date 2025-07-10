@@ -111,33 +111,70 @@ def _run_client(mode: str, decode_steps: int, args: argparse.Namespace) -> tuple
         raise e
 
 def run_experiment(args):
-    results: List[Dict[str, Any]] = []
+    # --- Resume Logic ---
+    completed_runs = set()
+    output_path = Path(args.output)
+    is_new_file = not output_path.exists() or output_path.stat().st_size == 0
 
-    for trial in range(1, args.trials + 1):
-        for steps in DECODE_STEPS_LIST:
-            for mode, mode_label in MODES_TO_RUN.items():
-                print(f"Trial {trial}, Mode: {mode_label}, Decode Steps: {steps}…", flush=True)
-
+    if not is_new_file:
+        print(f"Found existing results file: {args.output}. Resuming experiment.")
+        with open(output_path, "r", newline="") as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                # Recreate the key to check for completion
                 try:
-                    latency, metrics = _run_client(mode, steps, args)
-                    results.append({
-                        "trial": trial,
-                        "mode": mode_label,
-                        "decode_steps": steps,
-                        "latency_s": latency,
-                        "net_bytes": metrics.get("NETWORK_BYTES", 0),
-                        "avg_sm": metrics.get("AVG_SM_UTIL", 0.0),
-                    })
-                except Exception as e:
-                    print(f"  Skipping failed run: {e}", file=sys.stderr)
-                    continue
+                    key = (
+                        int(row["trial"]),
+                        row["mode"],
+                        int(row["decode_steps"])
+                    )
+                    completed_runs.add(key)
+                except (KeyError, ValueError) as e:
+                    print(f"Skipping malformed row in existing CSV: {row} ({e})")
+            print(f"Loaded {len(completed_runs)} completed runs.")
+    # ---
 
-    # Write output CSV
     fieldnames = ["trial", "mode", "decode_steps", "latency_s", "net_bytes", "avg_sm"]
-    with open(args.output, "w", newline="") as f:
+    
+    # Open in append mode, so we can resume.
+    with open(args.output, "a", newline="") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(results)
+        if is_new_file:
+            writer.writeheader()
+        
+        # Ensure data is written immediately to disk after each row.
+        f.flush()
+
+        for trial in range(1, args.trials + 1):
+            for steps in DECODE_STEPS_LIST:
+                for mode, mode_label in MODES_TO_RUN.items():
+                    # --- Resume Logic: Check if we should skip ---
+                    run_key = (trial, mode_label, steps)
+                    if run_key in completed_runs:
+                        print(f"Skipping completed run: Trial {trial}, Mode: {mode_label}, Steps: {steps}")
+                        continue
+                    # ---
+
+                    print(f"Trial {trial}, Mode: {mode_label}, Decode Steps: {steps}…", flush=True)
+
+                    try:
+                        latency, metrics = _run_client(mode, steps, args)
+                        
+                        # Write result immediately
+                        writer.writerow({
+                            "trial": trial,
+                            "mode": mode_label,
+                            "decode_steps": steps,
+                            "latency_s": latency,
+                            "net_bytes": metrics.get("NETWORK_BYTES", 0),
+                            "avg_sm": metrics.get("AVG_SM_UTIL", 0.0),
+                        })
+                        f.flush() # Ensure it's written to disk
+
+                    except Exception as e:
+                        print(f"  Skipping failed run: {e}", file=sys.stderr)
+                        continue
+
     print(f"\nScaling experiment complete. Results written to {args.output}")
 
 def _parse_args(argv=None):

@@ -345,8 +345,8 @@ def _run_client(mode: str, phase: str, args) -> tuple[float, dict]:
     # runs.  Disable by setting the environment variable
     #   NO_SKIP_WEIGHT_UPLOAD=1
     # before running the driver.
-    if mode == "naive" and not os.environ.get("NO_SKIP_WEIGHT_UPLOAD"):
-        cmd_list.append("--skip_weight_upload")
+    #if mode == "naive" and not os.environ.get("NO_SKIP_WEIGHT_UPLOAD"):
+    #    cmd_list.append("--skip_weight_upload")
 
     # Add debug info
     print(f"  Running client: mode={mode}, phase={phase}, port={args.master_port}", flush=True)
